@@ -329,6 +329,13 @@ pub enum EventPayload {
         role_id: Uuid,
         user_id: Uuid,
     },
+    /// Book-owner authority changed through the bootstrapped Change owner
+    /// workflow. Emails are recorded because the successor may not have
+    /// signed in yet and therefore may not have a runtime user id.
+    BookOwnerChanged {
+        previous_owner_email: String,
+        new_owner_email: String,
+    },
 }
 
 impl EventPayload {
@@ -348,6 +355,7 @@ impl EventPayload {
             EventPayload::RoleCreated { .. }
             | EventPayload::WorkflowAssignedToRole { .. }
             | EventPayload::RoleAssignedToUser { .. } => EventType::RoleAssignment,
+            EventPayload::BookOwnerChanged { .. } => EventType::Administrative,
         }
     }
 
@@ -369,6 +377,7 @@ impl EventPayload {
             EventPayload::RoleCreated { role } => role.role_id,
             EventPayload::WorkflowAssignedToRole { role_id, .. } => *role_id,
             EventPayload::RoleAssignedToUser { role_id, .. } => *role_id,
+            EventPayload::BookOwnerChanged { .. } => Uuid::nil(),
         }
     }
 }

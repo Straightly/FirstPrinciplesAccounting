@@ -39,6 +39,8 @@ export default function App() {
   const [selectedBookId, setSelectedBookId] = useState("");
   const [myWorkflows, setMyWorkflows] = useState(null);
   const [pickerError, setPickerError] = useState("");
+  const [newOwnerEmail, setNewOwnerEmail] = useState("");
+  const [newOwnerPassphrase, setNewOwnerPassphrase] = useState("");
 
   async function loadMe() {
     const r = await api("/api/auth/me");
@@ -86,6 +88,29 @@ export default function App() {
     await api("/api/auth/logout", { method: "POST" });
     setMe(null);
     setMessage("");
+  }
+
+  async function changeOwner(e) {
+    e.preventDefault();
+    if (!selectedBook) return;
+    const r = await api(`/api/books/${selectedBook.book_id}/workflows/change-owner`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op_id: crypto.randomUUID(),
+        new_owner_email: newOwnerEmail,
+        new_passphrase: newOwnerPassphrase,
+      }),
+    });
+    if (r.ok) {
+      setBooks((current) => (current || []).filter((b) => b.book_id !== selectedBook.book_id));
+      setSelectedBookId("");
+      setNewOwnerEmail("");
+      setNewOwnerPassphrase("");
+      setMessage(`Ownership transferred to ${r.body.owner_email}. Your owner access ended immediately.`);
+    } else {
+      setMessage(`${r.body.error_code}: ${r.body.message}`);
+    }
   }
 
   // Book picker (Impl Spec §6.5/§7.1, Impl Plan M6/M7): a bootstrapped
@@ -236,6 +261,35 @@ export default function App() {
             </li>
           ))}
         </ul>
+      )}
+      {selectedBook && selectedBook.owner_email.toLowerCase() === me.user.email.toLowerCase() && (
+        <>
+          <hr />
+          <h2 style={{ fontSize: 16 }}>Change owner</h2>
+          <p style={{ fontSize: 13 }}>
+            This transfers control immediately and replaces the passphrase used to open the book.
+          </p>
+          <form onSubmit={changeOwner}>
+            <input
+              type="email"
+              required
+              placeholder="New owner email"
+              value={newOwnerEmail}
+              onChange={(e) => setNewOwnerEmail(e.target.value)}
+              style={{ display: "block", padding: 8, width: "100%", marginTop: 4 }}
+            />
+            <input
+              type="password"
+              required
+              minLength={8}
+              placeholder="New owner passphrase"
+              value={newOwnerPassphrase}
+              onChange={(e) => setNewOwnerPassphrase(e.target.value)}
+              style={{ display: "block", padding: 8, width: "100%", marginTop: 8 }}
+            />
+            <button style={button} type="submit">Transfer ownership</button>
+          </form>
+        </>
       )}
     </div>
   );

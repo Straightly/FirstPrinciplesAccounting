@@ -408,6 +408,7 @@ impl EngineState {
                     .or_default()
                     .insert(*user_id);
             }
+            EventPayload::BookOwnerChanged { .. } => {}
         }
         self.log.push(record);
     }
@@ -1064,6 +1065,40 @@ impl AccountingEngine {
     }
 
     // -- workflows and roles ---------------------------------------------------
+
+    /// Records the bootstrapped Change owner workflow in the immutable book
+    /// log. Authorization and key rewrapping live at the backend/storage
+    /// boundary; the engine remains the audit authority.
+    pub fn change_owner(
+        &mut self,
+        op_id: Uuid,
+        actor: Uuid,
+        previous_owner_email: String,
+        new_owner_email: String,
+    ) -> Result<Uuid, EngineError> {
+        let request = json!({
+            "op": "change_owner",
+            "previous_owner_email": previous_owner_email,
+            "new_owner_email": new_owner_email
+        });
+        if let Some(done) = self.check_idempotency(op_id, &request)? {
+            return Ok(done);
+        }
+        if new_owner_email.trim().is_empty() {
+            return Err(EngineError::invalid_input(
+                "new owner email must not be empty",
+            ));
+        }
+        Ok(self.record(
+            op_id,
+            actor,
+            request,
+            EventPayload::BookOwnerChanged {
+                previous_owner_email,
+                new_owner_email,
+            },
+        ))
+    }
 
     /// Registers an immutable deployment record and auto-creates its
     /// same-named role containing exactly that workflow (Impl Spec §6.1).

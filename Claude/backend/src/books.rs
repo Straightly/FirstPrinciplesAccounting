@@ -39,7 +39,7 @@ pub struct BookMeta {
 
 /// An open book: the live engine plus the storage handle that persists it.
 pub struct OpenBook {
-    pub meta: BookMeta,
+    pub meta: RwLock<BookMeta>,
     pub engine: RwLock<AccountingEngine>,
     store: FileBookStore,
 }
@@ -115,6 +115,13 @@ impl BooksRegistry {
         self.dir.join(book_id.to_string())
     }
 
+    pub async fn get_meta(&self, book_id: Uuid) -> Result<BookMeta, ApiError> {
+        if let Some(open) = self.open.read().await.get(&book_id) {
+            return Ok(open.meta.read().await.clone());
+        }
+        read_meta(&self.book_dir(book_id)).await
+    }
+
     /// Bootstrap-owner-gated (Impl Spec §5.3): creates the folder and the
     /// encrypted event log, auto-creates the book's one entity (Impl Plan
     /// M7 — a book has exactly one, never created separately), and holds
@@ -148,7 +155,7 @@ impl BooksRegistry {
         };
         write_meta(&dir, &meta).await?;
         let open_book = Arc::new(OpenBook {
-            meta: meta.clone(),
+            meta: RwLock::new(meta.clone()),
             engine: RwLock::new(engine),
             store,
         });
@@ -160,7 +167,7 @@ impl BooksRegistry {
     /// already-open book returns its metadata without touching disk again.
     pub async fn open(&self, book_id: Uuid, passphrase: &str) -> Result<BookMeta, ApiError> {
         if let Some(existing) = self.open.read().await.get(&book_id) {
-            return Ok(existing.meta.clone());
+            return Ok(existing.meta.read().await.clone());
         }
         let dir = self.book_dir(book_id);
         let meta = read_meta(&dir).await?;
@@ -172,7 +179,7 @@ impl BooksRegistry {
             .map_err(|e| ApiError::internal(format!("stored event log failed to replay: {e}")))?;
         let engine = AccountingEngine::from_state(state, Box::new(SystemClock));
         let open_book = Arc::new(OpenBook {
-            meta: meta.clone(),
+            meta: RwLock::new(meta.clone()),
             engine: RwLock::new(engine),
             store,
         });
@@ -226,6 +233,51 @@ impl BooksRegistry {
     /// opened it.
     pub async fn list_open(&self) -> Vec<Arc<OpenBook>> {
         self.open.read().await.values().cloned().collect()
+    }
+
+    /// Runs the Change owner workflow as one serialized book operation:
+    /// append its audit event, persist it, rewrap the book key, then publish
+    /// the new owner in book metadata and live authorization state.
+    pub async fn change_owner(
+        &self,
+        open_book: &OpenBook,
+        op_id: Uuid,
+        actor_user_id: Uuid,
+        new_owner_email: &str,
+        new_passphrase: &str,
+    ) -> Result<BookMeta, ApiError> {
+        let previous = open_book.meta.read().await.clone();
+        let mut engine = open_book.engine.write().await;
+        let before = engine.audit_log().len();
+        engine.change_owner(
+            op_id,
+            actor_user_id,
+            previous.owner_email.clone(),
+            new_owner_email.to_string(),
+        )?;
+        let new_ids: Vec<Uuid> = engine.audit_log()[before..]
+            .iter()
+            .map(|event| event.event_id)
+            .collect();
+        if !new_ids.is_empty() {
+            open_book
+                .store
+                .persist(engine.audit_log(), &new_ids)
+                .await
+                .map_err(storage_err)?;
+            let provider = PassphraseKeyProvider::new(new_passphrase);
+            open_book
+                .store
+                .rewrap_key(&provider)
+                .await
+                .map_err(storage_err)?;
+        }
+        drop(engine);
+        let mut updated = previous;
+        updated.owner_email = new_owner_email.to_string();
+        write_meta(open_book.store.dir(), &updated).await?;
+        *open_book.meta.write().await = updated.clone();
+        Ok(updated)
     }
 
     /// Bootstrap-owner-gated (Impl Spec §7.3, Impl Plan M9, resolution R3):

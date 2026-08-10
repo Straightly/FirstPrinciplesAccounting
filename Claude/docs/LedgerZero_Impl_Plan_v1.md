@@ -207,6 +207,10 @@ Partially pre-done during M0/M1: `scripts/package.sh` (release tarball) and `doc
 
 **Phase 1 exit criteria (the release the user runs real books on first):** M1–M10 above all done and verified — everything except a dedicated reconciliation workflow and sub-books/consolidation, which are Phase 2 below.
 
+## M10.1 — Change owner workflow ✅ DONE (2026-08-10)
+
+Added the launcher-native Change owner workflow in the Claude Lane. The current book owner alone can transfer ownership; the engine records an immutable `BookOwnerChanged` administrative event, storage rewraps the live book key for the successor's passphrase, book metadata and all book-scoped authorization switch immediately, and the old passphrase no longer opens the current book. The successor can discover, close, reopen, back up, and administer the book as its current owner. Historical backups remain readable with the passphrase that wrapped their historical keystore, which is explicitly documented. Covered end to end by `backend/tests/ownership_flow.rs`; the full Rust suite and frontend production build pass.
+
 ## Phase 2 — Periods/reconciliation and sub-books/consolidation (deferred until Phase 1 is in real use)
 
 Deferred by the user's request once M8 shipped (Impl Spec Appendix A, resolution R2) — the design is unchanged and complete below, just not scheduled yet. Renumbered from their original M9/M11 to M11/M12 so Phase 1 above reads as a clean, contiguous M1–M10; every cross-reference elsewhere (Impl Spec, `mcp_server/`, `docs/LedgerZero_Manual_Verification.md`) was swept to match. Come back to this section once Phase 1 has been running with real books for a while.
@@ -230,6 +234,6 @@ Deferred by the user's request once M8 shipped (Impl Spec Appendix A, resolution
 
 ## Deferred (tracked, not scheduled)
 
-Cross-server consolidation auth; FX translation between books; consolidation scheduling beyond on-demand; year-end close workflow; reporting tools; re-open-by-branching; brokerage import; containerization; SQLite/Postgres drivers; identity-merge workflow (Theorem T4) and runtime provider-administration workflow (Theorem T3) once workflow machinery exists (M5+); metrics and distributed tracing (M10 shipped structured request logging only, `docs/LedgerZero_Run_and_Deploy.md` §3); a change-passphrase/rewrap primitive for revoking access on ownership transfer (Impl Spec §3.3, resolution R4).
+Cross-server consolidation auth; FX translation between books; consolidation scheduling beyond on-demand; year-end close workflow; reporting tools; re-open-by-branching; brokerage import; containerization; SQLite/Postgres drivers; identity-merge workflow (Theorem T4) and runtime provider-administration workflow (Theorem T3) once workflow machinery exists (M5+); metrics and distributed tracing (M10 shipped structured request logging only, `docs/LedgerZero_Run_and_Deploy.md` §3).
 
 Standing architectural guarantees are tracked in `LedgerZero_Theorems.md`; every milestone must preserve them.

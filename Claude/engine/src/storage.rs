@@ -398,6 +398,19 @@ impl FileBookStore {
         &self.dir
     }
 
+    /// Rewraps the already-open in-memory book key for a successor owner.
+    /// Book data is not decrypted/re-encrypted and the raw key never leaves
+    /// this storage boundary.
+    pub async fn rewrap_key(&self, key_provider: &dyn BookKeyProvider) -> Result<(), StorageError> {
+        let keystore = key_provider.wrap(&self.book_key)?;
+        let bytes = serde_json::to_vec_pretty(&keystore)
+            .map_err(|e| StorageError::Corrupt(e.to_string()))?;
+        atomic_write(&self.dir.join(KEYSTORE_FILE), &bytes).await?;
+        git_init(&self.dir).await?;
+        git_commit(&self.dir, "book owner changed; key rewrapped").await?;
+        Ok(())
+    }
+
     /// Bootstraps a brand-new book folder: random book key wrapped for the
     /// given key provider, an empty encrypted event log, and a fresh backup
     /// git repository with an initial commit.

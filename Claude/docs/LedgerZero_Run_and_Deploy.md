@@ -304,10 +304,17 @@ deployment, not just developing against one.
 
 ### Ownership transfer
 
-**Corrected in this milestone (Impl Spec §3.3, resolution R4) — read this
-before doing a transfer.** Backup/restore never re-encrypt anything, and
-there is no change-passphrase primitive in v1: the same passphrase keeps
-working across any number of backups and restores, forever. Practically:
+Use the launcher's **Change owner** workflow while the book is open. Enter
+the successor's authenticated email and a new passphrase for them. The
+workflow records an immutable `BOOK_OWNER_CHANGED` administrative event,
+rewraps the in-memory book key under the successor's passphrase, updates the
+book metadata, and removes the former owner's book authority immediately.
+
+The successor should sign in, confirm the book appears in **My workflows**,
+close it, and reopen it with the new passphrase. The former owner's old
+passphrase no longer opens the current book.
+
+Historical copies still require care:
 
 - Anyone who has ever known a book's passphrase can decrypt any copy of it
   they later obtain, by any means — a `backup_book` output, a raw folder
@@ -319,11 +326,9 @@ working across any number of backups and restores, forever. Practically:
   receiving side starts with no git history of its own (no commit
   timestamps/cadence carried over) — but that protects operational
   metadata, not the data itself.
-- If revoking the old party's access is actually required, v1 has no
-  built-in primitive for it: stand up a brand-new book with an
-  independently generated passphrase and move the data across some other
-  way. This is a real v1 limitation, not an oversight — track it if it
-  becomes a real need.
+- Rewrapping revokes the old passphrase only for the current keystore and
+  future backups. It cannot revoke access to an older backup or git commit
+  that still contains the prior keystore.
 
 ### Restore runbook (disaster recovery)
 

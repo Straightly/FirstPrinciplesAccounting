@@ -31,6 +31,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/books/mine", get(books_api::list_my_books))
         .route("/books/restore", post(books_api::restore_book))
         .route("/books/:book_id/open", post(books_api::open_book))
+        .route(
+            "/books/:book_id/workflows/change-owner",
+            post(books_api::change_owner),
+        )
         .route("/books/:book_id/close", post(books_api::close_book))
         .route("/books/:book_id/backup", post(books_api::backup_book))
         .route("/books/:book_id/entities", get(books_api::list_entities))

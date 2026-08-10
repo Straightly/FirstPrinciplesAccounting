@@ -1,6 +1,6 @@
 //! Book lifecycle and core accounting APIs (Impl Spec §5.3, §5.4, §6.5;
 //! Impl Plan M4). Every handler here re-authenticates from the session
-//! cookie and re-authorizes against the bootstrap owner — no capability
+//! cookie and re-authorizes against the current book owner — no capability
 //! tokens, the backend re-checks context against server-side state on every
 //! call (Impl Spec §7.4/§6.5 carried over from workflow-originated calls).
 
@@ -22,16 +22,23 @@ use uuid::Uuid;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-async fn authenticated_owner(state: &SharedState, headers: &HeaderMap) -> Result<User, ApiError> {
+async fn authenticated_book_owner(
+    state: &SharedState,
+    headers: &HeaderMap,
+    open_book: &OpenBook,
+) -> Result<User, ApiError> {
     let user = crate::auth::current_user(state, headers)?;
-    if let Err(err) = state.authz.authorize(&user, Action::BookApi) {
+    let owner_email = open_book.meta.read().await.owner_email.clone();
+    if !user.email.trim().eq_ignore_ascii_case(owner_email.trim()) {
         state.audit.record(
             "authorization",
             &user.email,
             "denied",
-            "book API requires bootstrap owner (v1: no role system until M5)",
+            "book API requires the current book owner",
         );
-        return Err(err);
+        return Err(ApiError::unauthorized_api(
+            "book API requires the current book owner",
+        ));
     }
     Ok(user)
 }
@@ -43,8 +50,8 @@ async fn book_context(
     headers: &HeaderMap,
     book_id: Uuid,
 ) -> Result<(User, Arc<OpenBook>), ApiError> {
-    let user = authenticated_owner(state, headers).await?;
     let open_book = state.books.get_open(book_id).await?;
+    let user = authenticated_book_owner(state, headers, &open_book).await?;
     Ok((user, open_book))
 }
 
@@ -95,6 +102,51 @@ pub struct BookResponse {
     /// The book's one entity (Impl Plan M7), created automatically — no
     /// separate call is needed to learn it.
     pub entity_id: Uuid,
+}
+
+#[derive(Deserialize)]
+pub struct ChangeOwnerRequest {
+    pub op_id: Uuid,
+    pub new_owner_email: String,
+    pub new_passphrase: String,
+}
+
+/// POST /api/books/:book_id/workflows/change-owner — bootstrapped workflow.
+/// Only the book's current owner may execute it. It appends an immutable
+/// audit event and rewraps the book key for the successor's passphrase.
+pub async fn change_owner(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<ChangeOwnerRequest>,
+) -> Result<Json<BookMeta>, ApiError> {
+    let open_book = state.books.get_open(book_id).await?;
+    let user = authenticated_book_owner(&state, &headers, &open_book).await?;
+    let email = body.new_owner_email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err(ApiError::invalid_input("new owner email is invalid"));
+    }
+    if user.email.eq_ignore_ascii_case(&email) {
+        return Err(ApiError::invalid_input(
+            "new owner must be a different user",
+        ));
+    }
+    if body.new_passphrase.len() < 8 {
+        return Err(ApiError::invalid_input(
+            "new passphrase must be at least 8 characters",
+        ));
+    }
+    let meta = state
+        .books
+        .change_owner(
+            &open_book,
+            body.op_id,
+            user.user_id,
+            &email,
+            &body.new_passphrase,
+        )
+        .await?;
+    Ok(Json(meta))
 }
 
 /// POST /api/books — bootstrap-owner-gated (Impl Spec §5.3). Creating a book
@@ -148,14 +200,21 @@ pub async fn open_book(
     Json(body): Json<OpenBookRequest>,
 ) -> Result<Json<BookResponse>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
-    if let Err(err) = state.authz.authorize(&user, Action::OpenBook) {
+    let current = state.books.get_meta(book_id).await?;
+    if !user
+        .email
+        .trim()
+        .eq_ignore_ascii_case(current.owner_email.trim())
+    {
         state.audit.record(
             "authorization",
             &user.email,
             "denied",
-            "open_book requires bootstrap owner",
+            "open_book requires the current book owner",
         );
-        return Err(err);
+        return Err(ApiError::unauthorized_api(
+            "open_book requires the current book owner",
+        ));
     }
     let meta = state.books.open(book_id, &body.passphrase).await?;
     Ok(Json(BookResponse {
@@ -175,14 +234,26 @@ pub async fn close_book(
     Path(book_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
-    if let Err(err) = state.authz.authorize(&user, Action::CloseBook) {
+    let authorized = match state.books.get_meta(book_id).await {
+        Ok(current) => user
+            .email
+            .trim()
+            .eq_ignore_ascii_case(current.owner_email.trim()),
+        // Preserve close's operationally useful idempotency for a never-known
+        // id, but only for the installation bootstrap operator.
+        Err(err) if err.error_code == "UNKNOWN_BOOK" => state.authz.is_bootstrap_owner(&user),
+        Err(err) => return Err(err),
+    };
+    if !authorized {
         state.audit.record(
             "authorization",
             &user.email,
             "denied",
-            "close_book requires bootstrap owner",
+            "close_book requires the current book owner",
         );
-        return Err(err);
+        return Err(ApiError::unauthorized_api(
+            "close_book requires the current book owner",
+        ));
     }
     state.books.close(book_id).await;
     Ok(Json(
@@ -206,14 +277,21 @@ pub async fn backup_book(
     Json(body): Json<BackupBookRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
-    if let Err(err) = state.authz.authorize(&user, Action::BackupBook) {
+    let current = state.books.get_meta(book_id).await?;
+    if !user
+        .email
+        .trim()
+        .eq_ignore_ascii_case(current.owner_email.trim())
+    {
         state.audit.record(
             "authorization",
             &user.email,
             "denied",
-            "backup_book requires bootstrap owner",
+            "backup_book requires the current book owner",
         );
-        return Err(err);
+        return Err(ApiError::unauthorized_api(
+            "backup_book requires the current book owner",
+        ));
     }
     state
         .books
@@ -290,17 +368,27 @@ pub async fn list_my_books(
     headers: HeaderMap,
 ) -> Result<Json<Vec<BookMeta>>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
-    if state.authz.is_bootstrap_owner(&user) {
-        return Ok(Json(state.books.list().await?));
-    }
     let mut visible = Vec::new();
+    for meta in state.books.list().await? {
+        if user
+            .email
+            .trim()
+            .eq_ignore_ascii_case(meta.owner_email.trim())
+        {
+            visible.push(meta);
+        }
+    }
     for open_book in state.books.list_open().await {
+        let meta = open_book.meta.read().await.clone();
+        if visible.iter().any(|book| book.book_id == meta.book_id) {
+            continue;
+        }
         let engine = open_book.engine.read().await;
         if !engine
             .entities_with_workflows_for_user(user.user_id)
             .is_empty()
         {
-            visible.push(open_book.meta.clone());
+            visible.push(meta);
         }
     }
     Ok(Json(visible))
