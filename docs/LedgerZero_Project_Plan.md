@@ -333,3 +333,21 @@ Spec interpretation used for implementation: sub-book creation copies parent boo
   - Acceptance criteria: One local command can run the routing server with runtime backend, frontend, MCP, and Python dev-time backend logically separated; health endpoints prove component readiness; no component crosses the storage credential boundary; documentation explains how to open a book, run sample workflows, checkpoint to git, export, and restore.
   - Tests: Full-system smoke test; health-check test; storage-boundary regression test; sample workflow smoke test; export/restore smoke test; restart/reopen test.
   - Review gate: Stop for full first-implementation review before adding non-v1 features.
+
+## Implementation phase status in this implementation repo.
+
+This section records the current implementation phase split in `/Users/zhian/Projects/FirstPrincipleAccountingSpec` without reconciling the older writing copy under `Writing/Accounting` yet. The detailed implementation plan of record is `LedgerZero_Impl_Plan_v1.md`; the broad 20-step implementation section above remains useful as planning history, but the live implementation status is tracked by the phase plan below.
+
+- [X] Phase 1 — runnable single-book LedgerZero system
+  - Dependencies: M0-M10 in `LedgerZero_Impl_Plan_v1.md`.
+  - Scope: Repository scaffold, authentication and authorization skeleton, Rust `AccountingEngine`, encrypted single-file book storage, runtime backend APIs, frontend launcher, first hand-built workflow, workflow deployment and role authorization, generated-workflow path through MCP and Python dev-time backend, backup/restore, hardening, and deployment documentation.
+  - Acceptance criteria: M0-M10 are complete and verified in the implementation plan; the system can run a real single-book workflow before dedicated reconciliation and sub-book/consolidation features exist; run/deploy and manual-verification docs exist.
+  - Tests: `./scripts/check.sh`, backend/engine/frontend/MCP tests, browser/manual workflow checks, backup/restore checks, and deployment rehearsal evidence recorded in `LedgerZero_Impl_Plan_v1.md`.
+  - Review gate: Use Phase 1 with real books and review operational behavior before starting Phase 2.
+
+- [ ] Phase 2 — periods/reconciliation and sub-books/consolidation
+  - Dependencies: Phase 1 has been in real use long enough to expose practical accounting workflow needs.
+  - Scope: Dedicated end-of-period reconciliation workflow, period close/reopen exercised through workflows, `explain_reconciliation_issue`, `create_sub_book`, sub-book link events, consolidation rules, and idempotent consolidation execution.
+  - Acceptance criteria: A full monthly cycle can be performed end-to-end; parent books can consolidate child-book activity on one deployment without duplicate consolidation entries; unresolved mapping or authorization issues remain pending rather than creating invented entries.
+  - Tests: Reconciliation match/discrepancy tests, closed-period rejection tests, default consolidation tests, summary-account mapping tests, pending-until-authorized tests, and idempotent consolidation re-run tests.
+  - Review gate: Start only after the Phase 1 real-book trial confirms this is the next most valuable step.
