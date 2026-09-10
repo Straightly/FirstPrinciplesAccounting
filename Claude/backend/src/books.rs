@@ -280,7 +280,8 @@ impl BooksRegistry {
         Ok(updated)
     }
 
-    /// Bootstrap-owner-gated (Impl Spec §7.3, Impl Plan M9, resolution R3):
+    /// Current-book-owner-gated at the API layer (Impl Spec §7.3, Impl Plan
+    /// M9/M10.1, resolution R3/R5):
     /// copies a book's three portable files — `book.json`, `book.data.enc`,
     /// `book.keystore.json` — to `location` verbatim. No decryption, so
     /// this needs neither an open book nor any passphrase, and works
@@ -302,10 +303,11 @@ impl BooksRegistry {
         Ok(())
     }
 
-    /// Bootstrap-owner-gated (Impl Plan M9): releases `book_id` from the
-    /// in-memory open-books map. Idempotent — a no-op if it isn't open.
-    /// Exists specifically so `restore` (below) has a way to act on a book
-    /// this process currently holds open.
+    /// Current-book-owner-gated at the API layer for known books (Impl Plan
+    /// M9/M10.1): releases `book_id` from the in-memory open-books map.
+    /// Idempotent — a no-op if it isn't open. Exists specifically so
+    /// `restore` (below) has a way to act on a book this process currently
+    /// holds open.
     pub async fn close(&self, book_id: Uuid) {
         self.open.write().await.remove(&book_id);
     }

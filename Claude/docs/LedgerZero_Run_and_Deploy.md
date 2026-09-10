@@ -259,11 +259,12 @@ deployment, not just developing against one.
 ### Bootstrap (first run on a fresh install)
 
 1. Set `bootstrap_owner_email` in `server.config.toml` to the identity that
-   should hold owner authority — on a fresh install (no books yet), only
-   this identity may call `create_accounting_book`, `open_book`, or any of
-   `backup_book`/`close_book`/`restore_book` (Impl Spec §5.3; these three
-   are bootstrap-owner-gated specifically because they may need to act
-   before a book is open at all, Impl Plan M9).
+   should create the first books and hold recovery authority. On a fresh
+   install (no books yet), only this identity may call
+   `create_accounting_book`; `restore_book` remains bootstrap/recovery-gated
+   because it can replace a closed book before an open-book context exists.
+   Once a book exists, `open_book`, `backup_book`, known-book `close_book`,
+   and ownership transfer are current-book-owner operations.
 2. Start the server, sign in as that identity (§2), confirm
    `is_bootstrap_owner: true` and the expected `allowed_actions` list.
 3. `create_accounting_book` — this also creates the book's one entity

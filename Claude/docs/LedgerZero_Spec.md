@@ -192,9 +192,9 @@ For the first implementation:
 - one `AccountingBook` has one owner role at bootstrap
 - the owner role is initially held by one user
 - the current owner may transfer the owner role to another user, but loses that owner authority after the transfer
-- ownership transfer requires re-encrypting the book for the new owner
+- ownership transfer rewraps the live book key for the new owner; historical encrypted copies keep their historical keystore boundary
 - entities, roles, workflows, accounts, and entries all belong to exactly one `AccountingBook`
-- `AccountingBook` is the storage, export, restore, and bootstrap security boundary
+- `AccountingBook` is the storage, export, restore, and book-owner security boundary
 - `Entity` remains the accounting and reporting boundary inside the book
 
 #### 2.2.0.1 Sub-Ledger / Sub-Book
@@ -553,7 +553,7 @@ For the first implementation:
 - key material is injected into backend memory only through the `BookKeyProvider`; later providers may use an operating-system keystore, KMS, HSM, environment secret manager, or other secret source without changing the ledger engine or book format
 - frontend code, generated workflow code, and MCP tools must not receive raw encryption keys
 - there is no key transfer between users
-- when ownership is transferred, the book is re-encrypted for the new owner
+- when ownership is transferred, the live book key is rewrapped for the new owner
 - exports are encrypted for the intended reader of the export, usually the user who creates or receives the export
 - an export contains readable data only for the user authorized to read that export
 

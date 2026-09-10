@@ -224,10 +224,10 @@ pub async fn open_book(
     }))
 }
 
-/// POST /api/books/:book_id/close — bootstrap-owner-gated (Impl Spec §7.3,
-/// §5.4, Impl Plan M9). Releases the book from this process's in-memory
-/// open-books map; idempotent. Exists so a book can be closed before
-/// restoring over it.
+/// POST /api/books/:book_id/close — current-book-owner-gated for known books
+/// (Impl Spec §7.3, §5.4, Impl Plan M9/M10.1). Releases the book from this
+/// process's in-memory open-books map; idempotent. The bootstrap owner may
+/// only close an unknown id to preserve the original operational no-op.
 pub async fn close_book(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -266,10 +266,10 @@ pub struct BackupBookRequest {
     pub location: String,
 }
 
-/// POST /api/books/:book_id/backup — bootstrap-owner-gated (Impl Spec
-/// §7.3, Impl Plan M9, resolution R3). Copies the book's already-encrypted
-/// files verbatim to a server-side filesystem `location` — no passphrase
-/// involved, works whether or not the book is currently open.
+/// POST /api/books/:book_id/backup — current-book-owner-gated (Impl Spec
+/// §7.3, Impl Plan M9/M10.1, resolution R3/R5). Copies the book's
+/// already-encrypted files verbatim to a server-side filesystem `location`
+/// — no passphrase involved, works whether or not the book is currently open.
 pub async fn backup_book(
     State(state): State<SharedState>,
     headers: HeaderMap,
