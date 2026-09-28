@@ -49,7 +49,7 @@ def _request() -> WorkflowGenerationRequest:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_VENDOR_DIR = REPO_ROOT / "frontend" / "node_modules"
+REAL_VENDOR_DIR = REPO_ROOT / "frontend" / "dist" / "workflow"
 
 
 class TestPrepareArtifact(unittest.TestCase):
@@ -72,8 +72,7 @@ class TestPrepareArtifact(unittest.TestCase):
             "manifest.json",
             "code/index.html",
             "code/app.js",
-            "code/react.production.min.js",
-            "code/react-dom.production.min.js",
+            "code/workflow-react.js",
             "signatures/.gitkeep",
         }
         actual = {
@@ -82,6 +81,15 @@ class TestPrepareArtifact(unittest.TestCase):
             if p.is_file()
         }
         self.assertEqual(actual, expected)
+        self.assertEqual(
+            json.loads((result_dir / "manifest.json").read_text())["code_files"],
+            ["index.html", "app.js", "workflow-react.js"],
+        )
+        html = (result_dir / "code" / "index.html").read_text()
+        app_js = (result_dir / "code" / "app.js").read_text()
+        self.assertIn('<script type="module" src="app.js"></script>', html)
+        self.assertIn('from "./workflow-react.js"', app_js)
+        self.assertIn("createRoot(document.getElementById", app_js)
 
     def test_manifest_and_code_embed_the_real_deployment_id(self):
         generated = generate_workflow_definition(_request())

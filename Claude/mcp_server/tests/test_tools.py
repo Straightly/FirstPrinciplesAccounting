@@ -18,7 +18,7 @@ from first_principle_accounting.config import Config  # noqa: E402
 from first_principle_accounting.mcp import tools  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_VENDOR_DIR = REPO_ROOT / "frontend" / "node_modules"
+REAL_VENDOR_DIR = REPO_ROOT / "frontend" / "dist" / "workflow"
 
 
 class FakeRuntimeBackendClient:

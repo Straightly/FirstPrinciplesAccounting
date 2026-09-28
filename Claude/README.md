@@ -32,10 +32,9 @@ dependencies before building, including new major versions. If an upgrade
 breaks the build or should be held back, adjust the manifests and lockfiles
 before committing. The GitHub release workflow does not upgrade dependencies:
 it builds from the committed `Cargo.lock`, `package-lock.json`, and `uv.lock`.
-`rand` is currently excluded from major-version upgrades because the engine's
-key-generation API has not yet been migrated to `rand` 0.10.
-`react` and `react-dom` remain on 18 because generated workflow artifacts
-still vendor their UMD builds, which React 19 no longer provides.
+The frontend build also emits a self-contained React module for generated
+workflow artifacts. Build the frontend before generating or deploying a new
+workflow artifact.
 
 `server.config.toml` (gitignored) holds the bootstrap owner email and Google
 OAuth client credentials (Impl Spec §5.3). For local development without OAuth

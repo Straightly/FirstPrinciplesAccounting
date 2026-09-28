@@ -41,14 +41,13 @@ class Config:
             )
         )
     )
-    # Source of the vendored React/ReactDOM UMD builds generated artifacts
-    # ship with (Impl Spec §7.1: each workflow bundle carries its own React
-    # copy, no shared JS dependencies between workflows or the launcher).
+    # Source of the self-contained React ESM bundle generated artifacts ship
+    # with (Impl Spec §7.1: no shared JS between workflows or the launcher).
     react_vendor_dir: pathlib.Path = dataclasses.field(
         default_factory=lambda: pathlib.Path(
             os.environ.get(
                 "LZ_MCP_REACT_VENDOR_DIR",
-                str(_repo_root() / "frontend" / "node_modules"),
+                str(_repo_root() / "frontend" / "dist" / "workflow"),
             )
         )
     )

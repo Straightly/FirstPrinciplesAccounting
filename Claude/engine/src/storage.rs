@@ -16,8 +16,8 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
@@ -32,6 +32,12 @@ const LOCK_FILE: &str = "book.lock";
 const TMP_SUFFIX: &str = ".tmp";
 const BOOK_KEY_LEN: usize = 32;
 const GCM_NONCE_LEN: usize = 12;
+
+fn fill_random(bytes: &mut [u8]) -> Result<(), StorageError> {
+    SysRng
+        .try_fill_bytes(bytes)
+        .map_err(|e| StorageError::Crypto(format!("secure random generation failed: {e}")))
+}
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -182,12 +188,12 @@ impl PassphraseKeyProvider {
 impl BookKeyProvider for PassphraseKeyProvider {
     fn wrap(&self, book_key: &[u8; BOOK_KEY_LEN]) -> Result<KeystoreFile, StorageError> {
         let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
+        fill_random(&mut salt)?;
         let wrap_key = self.derive_wrap_key(&salt, self.profile)?;
         let cipher = Aes256Gcm::new_from_slice(&wrap_key)
             .map_err(|e| StorageError::Crypto(format!("bad wrap key: {e}")))?;
         let mut nonce_bytes = [0u8; GCM_NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce_bytes);
+        fill_random(&mut nonce_bytes)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, book_key.as_slice())
@@ -247,7 +253,7 @@ fn encrypt_events(
     let cipher = Aes256Gcm::new_from_slice(book_key)
         .map_err(|e| StorageError::Crypto(format!("bad book key: {e}")))?;
     let mut nonce_bytes = [0u8; GCM_NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    fill_random(&mut nonce_bytes)?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_slice())
@@ -429,7 +435,7 @@ impl FileBookStore {
         }
 
         let mut book_key = [0u8; BOOK_KEY_LEN];
-        OsRng.fill_bytes(&mut book_key);
+        fill_random(&mut book_key)?;
         let keystore = key_provider.wrap(&book_key)?;
         let keystore_json = serde_json::to_vec_pretty(&keystore)
             .map_err(|e| StorageError::Corrupt(e.to_string()))?;

@@ -37,6 +37,10 @@ browser would.
 
 ## Local setup
 
+Build the frontend first (`cd ../frontend && npm install && npm run build`)
+so the generated workflow's self-contained React 19 module is available at
+`frontend/dist/workflow/workflow-react.js`.
+
 ```sh
 cd mcp_server
 uv sync --locked

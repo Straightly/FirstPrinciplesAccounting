@@ -20,8 +20,6 @@ import uuid
 from ..config import Config
 from .generator import GeneratedWorkflow
 
-_CODE_FILES = ("react.production.min.js", "react-dom.production.min.js")
-
 
 class ArtifactPreparationError(Exception):
     pass
@@ -81,20 +79,10 @@ def prepare_artifact(
 
 
 def _vendor_react(code_dir: pathlib.Path, config: Config) -> None:
-    sources = {
-        "react.production.min.js": config.react_vendor_dir
-        / "react"
-        / "umd"
-        / "react.production.min.js",
-        "react-dom.production.min.js": config.react_vendor_dir
-        / "react-dom"
-        / "umd"
-        / "react-dom.production.min.js",
-    }
-    for filename, source in sources.items():
-        if not source.is_file():
-            raise ArtifactPreparationError(
-                f"vendored React file not found: {source} — run `npm install` "
-                "in frontend/ first"
-            )
-        shutil.copyfile(source, code_dir / filename)
+    source = config.react_vendor_dir / "workflow-react.js"
+    if not source.is_file():
+        raise ArtifactPreparationError(
+            f"vendored React bundle not found: {source} — run `npm run build` "
+            "in frontend/ first"
+        )
+    shutil.copyfile(source, code_dir / source.name)

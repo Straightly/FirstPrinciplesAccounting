@@ -33,14 +33,13 @@ if ! cargo upgrade --help >/dev/null 2>&1; then
 fi
 
 echo "== Upgrade Rust dependencies =="
-cargo upgrade --incompatible allow --pinned allow --exclude rand
+cargo upgrade --incompatible allow --pinned allow
 cargo update
 
 echo "== Upgrade frontend dependencies =="
 (
   cd frontend
-  npm exec --yes --package=npm-check-updates -- ncu --upgrade --target latest --reject react,react-dom
-  npm exec --yes --package=npm-check-updates -- ncu --upgrade --target minor --filter react,react-dom
+  npm exec --yes --package=npm-check-updates -- ncu --upgrade --target latest
   npm install --no-audit --no-fund
 )
 

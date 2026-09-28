@@ -143,8 +143,7 @@ def generate_workflow_definition(
         "code_files": [
             "index.html",
             "app.js",
-            "react.production.min.js",
-            "react-dom.production.min.js",
+            "workflow-react.js",
         ],
         "notes": (
             "manifest_hash/code_hash are computed fresh from these files at "
@@ -220,9 +219,7 @@ def _render_index_html(workflow_name: str) -> str:
   </head>
   <body>
     <div id="root"></div>
-    <script src="react.production.min.js"></script>
-    <script src="react-dom.production.min.js"></script>
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>
 """
@@ -327,6 +324,8 @@ def _render_app_js(
 // workflow. book_id/entity_id come from the URL query string (the launcher
 // supplies them); workflow_id/workflow_deployment_id identify this
 // deployed artifact and are fixed at generation/deploy time.
+import {{ React, createRoot }} from "./workflow-react.js";
+
 const WORKFLOW_ID = "{workflow_id}";
 const WORKFLOW_DEPLOYMENT_ID = "{_DEPLOYMENT_ID_PLACEHOLDER}";
 
@@ -488,6 +487,6 @@ function App() {{
   );
 }}
 
-ReactDOM.createRoot(document.getElementById("root")).render(e(App));
+createRoot(document.getElementById("root")).render(e(App));
 """
     return header
