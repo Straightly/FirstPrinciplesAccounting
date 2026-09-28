@@ -20,9 +20,9 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
           cache-dependency-path: Claude/frontend/package-lock.json
 
@@ -33,7 +33,7 @@ jobs:
           npm run build
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -59,7 +59,7 @@ jobs:
             --env CARGO_TARGET_DIR=/src/Claude/target \
             "$builder_image" \
             bash -euo pipefail -c '
-              microdnf install -y ca-certificates curl gcc gcc-c++ make perl tar gzip
+              microdnf install -y ca-certificates curl gcc gcc-c++ git make perl tar gzip
               microdnf clean all
               update-ca-trust
               curl --proto "=https" --tlsv1.2 --fail --silent --show-error \
@@ -111,7 +111,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload release archive and checksum
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ steps.package.outputs.artifact_base }}
           path: |
