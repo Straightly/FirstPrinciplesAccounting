@@ -218,3 +218,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 **/.DS_Store
+
+# Prompt journals belong in the private attention project, not this public repo.
+Journal/
