@@ -1,0 +1,120 @@
+name: Build FPA Oracle Linux ARM64 release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Verify and package FPA
+    runs-on: ubuntu-24.04-arm
+    if: github.ref == 'refs/heads/main'
+    env:
+      RUST_TOOLCHAIN: 1.97.0
+      TARGET: aarch64-unknown-linux-gnu
+
+    steps:
+      - name: Check out the selected commit
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: Claude/frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: Claude/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Test MCP server
+        run: |
+          python -m venv /tmp/fpa-mcp-venv
+          /tmp/fpa-mcp-venv/bin/pip install -e Claude/mcp_server
+          /tmp/fpa-mcp-venv/bin/python -m unittest discover -s Claude/mcp_server/tests -v
+
+      - name: Verify and build Rust backend in Oracle Linux 9
+        shell: bash
+        run: |
+          set -euo pipefail
+          builder_image="oraclelinux:9-slim"
+          docker pull "$builder_image"
+          builder_image="$(docker image inspect "$builder_image" --format '{{index .RepoDigests 0}}')"
+          echo "FPA_BUILDER_IMAGE=$builder_image" >> "$GITHUB_ENV"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src:rw" \
+            --workdir /src/Claude \
+            --env HOME=/tmp \
+            --env RUST_TOOLCHAIN \
+            --env CARGO_TARGET_DIR=/src/Claude/target \
+            "$builder_image" \
+            bash -euo pipefail -c '
+              microdnf install -y ca-certificates curl gcc gcc-c++ make perl tar gzip
+              microdnf clean all
+              update-ca-trust
+              curl --proto "=https" --tlsv1.2 --fail --silent --show-error \
+                https://sh.rustup.rs -o /tmp/rustup-init.sh
+              sh /tmp/rustup-init.sh -y --profile minimal \
+                --default-toolchain "$RUST_TOOLCHAIN"
+              source /tmp/.cargo/env
+              rustup component add rustfmt clippy
+              cargo fmt --all -- --check
+              cargo test --workspace --locked
+              cargo clippy --workspace --all-targets --locked
+              cargo build --release --locked --target aarch64-unknown-linux-gnu \
+                -p ledgerzero-backend
+            '
+
+      - name: Package commit-bound release artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_base="ledgerzero-${GITHUB_SHA}-linux-${TARGET}"
+          package_dir="dist/package"
+
+          mkdir -p "$package_dir/frontend"
+          install -m 0755 \
+            "Claude/target/${TARGET}/release/ledgerzero-backend" \
+            "$package_dir/ledgerzero-backend"
+          cp -R Claude/frontend/dist "$package_dir/frontend/dist"
+          cp Claude/server.config.example.toml "$package_dir/"
+          cp Claude/docs/LedgerZero_Run_and_Deploy.md "$package_dir/DEPLOY.md"
+          cp Claude/scripts/ledgerzero.service.example "$package_dir/"
+          printf 'FPA release from commit %s\nTarget: %s\nSee DEPLOY.md before installation.\n' \
+            "$GITHUB_SHA" "$TARGET" > "$package_dir/README.txt"
+
+          tar -C "$package_dir" -czf "dist/${artifact_base}.tar.gz" .
+          (
+            cd dist
+            sha256sum "${artifact_base}.tar.gz" > "${artifact_base}.sha256"
+          )
+
+          echo "artifact_base=${artifact_base}" >> "$GITHUB_OUTPUT"
+          {
+            echo '## FPA Oracle Linux ARM64 release'
+            echo
+            printf '%s\n' "Commit: $GITHUB_SHA" "Target: $TARGET" \
+              "Rust toolchain: $RUST_TOOLCHAIN" "Build image: $FPA_BUILDER_IMAGE" \
+              "Archive: ${artifact_base}.tar.gz" \
+              "SHA-256: $(cut -d ' ' -f 1 "dist/${artifact_base}.sha256")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release archive and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_base }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
