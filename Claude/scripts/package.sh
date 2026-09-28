@@ -8,6 +8,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+bash ./scripts/upgrade-deps.sh
+
 # Cargo may not be on the shell's PATH: rustup.rs installs to ~/.cargo/bin,
 # Homebrew's keg-only rustup to /opt/homebrew/opt/rustup/bin.
 if ! command -v cargo >/dev/null 2>&1; then
@@ -28,7 +30,7 @@ echo "== Building release binary =="
 cargo build --release -p ledgerzero-backend
 
 echo "== Building frontend =="
-(cd frontend && { [ -d node_modules ] || npm install --no-fund --no-audit; } && npm run build)
+(cd frontend && npm run build)
 
 echo "== Staging ${STAGE} =="
 rm -rf "$STAGE"

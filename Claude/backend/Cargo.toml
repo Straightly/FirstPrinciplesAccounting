@@ -7,18 +7,18 @@ description = "LedgerZero routing server + runtime backend application server"
 
 [dependencies]
 ledgerzero-engine = { path = "../engine" }
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-tower = { version = "0.4", features = ["util"] }
-tower-http = { version = "0.5", features = ["fs", "trace"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-toml = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-sha2 = "0.10"
+toml = "1.1"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
+sha2 = "0.11"
 
 [dev-dependencies]
 http-body-util = "0.1"

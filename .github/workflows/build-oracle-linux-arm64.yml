@@ -40,8 +40,9 @@ jobs:
       - name: Test MCP server
         run: |
           python -m venv /tmp/fpa-mcp-venv
-          /tmp/fpa-mcp-venv/bin/pip install -e Claude/mcp_server
-          /tmp/fpa-mcp-venv/bin/python -m unittest discover -s Claude/mcp_server/tests -v
+          /tmp/fpa-mcp-venv/bin/pip install uv==0.12.19
+          cd Claude/mcp_server
+          /tmp/fpa-mcp-venv/bin/uv run --locked python -m unittest discover -s tests -v
 
       - name: Verify and build Rust backend in Oracle Linux 9
         shell: bash
@@ -59,7 +60,7 @@ jobs:
             --env CARGO_TARGET_DIR=/src/Claude/target \
             "$builder_image" \
             bash -euo pipefail -c '
-              microdnf install -y ca-certificates curl gcc gcc-c++ git make perl tar gzip
+              microdnf install -y ca-certificates cmake curl gcc gcc-c++ git make perl tar gzip
               microdnf clean all
               update-ca-trust
               curl --proto "=https" --tlsv1.2 --fail --silent --show-error \

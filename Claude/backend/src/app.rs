@@ -18,8 +18,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/health", get(auth::health))
         .route("/auth/config", get(auth::auth_config))
         .route("/auth/me", get(auth::me))
-        .route("/auth/:provider/login", get(auth::provider_login))
-        .route("/auth/:provider/callback", get(auth::provider_callback))
+        .route("/auth/{provider}/login", get(auth::provider_login))
+        .route("/auth/{provider}/callback", get(auth::provider_callback))
         .route("/auth/dev-login", post(auth::dev_login))
         .route("/auth/refresh", post(auth::refresh))
         .route("/auth/logout", post(auth::logout))
@@ -30,86 +30,86 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/books/mine", get(books_api::list_my_books))
         .route("/books/restore", post(books_api::restore_book))
-        .route("/books/:book_id/open", post(books_api::open_book))
+        .route("/books/{book_id}/open", post(books_api::open_book))
         .route(
-            "/books/:book_id/workflows/change-owner",
+            "/books/{book_id}/workflows/change-owner",
             post(books_api::change_owner),
         )
-        .route("/books/:book_id/close", post(books_api::close_book))
-        .route("/books/:book_id/backup", post(books_api::backup_book))
-        .route("/books/:book_id/entities", get(books_api::list_entities))
+        .route("/books/{book_id}/close", post(books_api::close_book))
+        .route("/books/{book_id}/backup", post(books_api::backup_book))
+        .route("/books/{book_id}/entities", get(books_api::list_entities))
         .route(
-            "/books/:book_id/resource-types",
+            "/books/{book_id}/resource-types",
             get(books_api::list_resource_types).post(books_api::create_resource_type),
         )
         .route(
-            "/books/:book_id/charts",
+            "/books/{book_id}/charts",
             get(books_api::list_charts).post(books_api::create_chart),
         )
         .route(
-            "/books/:book_id/charts/:chart_id/copy",
+            "/books/{book_id}/charts/{chart_id}/copy",
             post(books_api::copy_chart),
         )
         .route(
-            "/books/:book_id/accounts",
+            "/books/{book_id}/accounts",
             get(books_api::list_accounts).post(books_api::create_account),
         )
         .route(
-            "/books/:book_id/accounts/:account_id",
+            "/books/{book_id}/accounts/{account_id}",
             patch(books_api::update_account),
         )
         .route(
-            "/books/:book_id/accounts/:account_id/active",
+            "/books/{book_id}/accounts/{account_id}/active",
             put(books_api::set_account_active),
         )
         .route(
-            "/books/:book_id/accounts/:account_id/balance",
+            "/books/{book_id}/accounts/{account_id}/balance",
             get(books_api::get_balance),
         )
         .route(
-            "/books/:book_id/periods",
+            "/books/{book_id}/periods",
             get(books_api::list_periods).post(books_api::create_period),
         )
         .route(
-            "/books/:book_id/periods/:period_id/close",
+            "/books/{book_id}/periods/{period_id}/close",
             post(books_api::close_period),
         )
         .route(
-            "/books/:book_id/periods/:period_id/reopen",
+            "/books/{book_id}/periods/{period_id}/reopen",
             post(books_api::reopen_period),
         )
         .route(
-            "/books/:book_id/entries",
+            "/books/{book_id}/entries",
             get(books_api::list_entries).post(books_api::post_entry),
         )
         .route(
-            "/books/:book_id/entries/reverse",
+            "/books/{book_id}/entries/reverse",
             post(books_api::reverse_entry),
         )
-        .route("/books/:book_id/audit-log", get(books_api::get_audit_log))
+        .route("/books/{book_id}/audit-log", get(books_api::get_audit_log))
         .route(
-            "/books/:book_id/prices",
+            "/books/{book_id}/prices",
             get(books_api::list_prices).post(books_api::record_price),
         )
-        .route("/books/:book_id/workflows", get(books_api::list_workflows))
+        .route("/books/{book_id}/workflows", get(books_api::list_workflows))
         .route(
-            "/books/:book_id/workflows/mine",
+            "/books/{book_id}/workflows/mine",
             get(books_api::my_workflows),
         )
         .route(
-            "/books/:book_id/workflows/deploy",
+            "/books/{book_id}/workflows/deploy",
             post(books_api::deploy_workflow),
         )
         .route(
-            "/books/:book_id/roles",
+            "/books/{book_id}/roles",
             get(books_api::list_roles).post(books_api::create_role),
         )
         .route(
-            "/books/:book_id/roles/:role_id/workflows",
+            "/books/{book_id}/roles/{role_id}/workflows",
             post(books_api::assign_workflow_to_role),
         )
         .route(
-            "/books/:book_id/roles/:role_id/users",
+            "/books/{book_id}/roles/{role_id}/users",
             post(books_api::assign_role_to_user),
         );
 

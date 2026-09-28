@@ -13,18 +13,29 @@ A first-principles, AI-native accounting platform. Authoritative documents:
 - `backend/` — Rust crate: routing server + runtime backend (Axum); the only component with storage access
 - `frontend/` — React + Vite launcher (login, session, workflow menu); each workflow is later deployed as its own self-contained React app
 - `mcp_server/` — Python MCP server + dev-time backend (LLM/workflow generation); no accounting storage access
-- `scripts/check.sh` — builds and tests everything
+- `scripts/check.sh` — upgrades dependencies, then builds and tests everything
 
 ## Getting started
 
-Prerequisites: Rust (rustup.rs), Node.js 20+, Python 3.11+.
+Prerequisites: Rust (rustup.rs), Node.js 24+, Python 3.11+. The local build
+bootstraps `uv` and `cargo-upgrade` into an ignored project-local directory
+when needed. Local builds need network access to check for new releases.
 
 ```bash
-./scripts/check.sh                                 # build + test all components
+./scripts/check.sh                                 # upgrade, build + test all components
 cp server.config.example.toml server.config.toml   # then edit
-(cd frontend && npm install && npm run build)
 cargo run -p ledgerzero-backend                    # serves http://localhost:8080
 ```
+
+Every local `check.sh` or `package.sh` run upgrades Rust, npm, and Python
+dependencies before building, including new major versions. If an upgrade
+breaks the build or should be held back, adjust the manifests and lockfiles
+before committing. The GitHub release workflow does not upgrade dependencies:
+it builds from the committed `Cargo.lock`, `package-lock.json`, and `uv.lock`.
+`rand` is currently excluded from major-version upgrades because the engine's
+key-generation API has not yet been migrated to `rand` 0.10.
+`react` and `react-dom` remain on 18 because generated workflow artifacts
+still vendor their UMD builds, which React 19 no longer provides.
 
 `server.config.toml` (gitignored) holds the bootstrap owner email and Google
 OAuth client credentials (Impl Spec §5.3). For local development without OAuth

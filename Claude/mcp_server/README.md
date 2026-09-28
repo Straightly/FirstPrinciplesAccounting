@@ -39,9 +39,8 @@ browser would.
 
 ```sh
 cd mcp_server
-python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/python -m first_principle_accounting.cli.main serve
+uv sync --locked
+uv run --locked python -m first_principle_accounting.cli.main serve
 ```
 
 `serve` expects a running LedgerZero backend (`cargo run -p

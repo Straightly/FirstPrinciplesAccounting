@@ -6,6 +6,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 FAILED=0
 
+bash ./scripts/upgrade-deps.sh || { echo "Dependency upgrade failed; local build stopped." >&2; exit 1; }
+
 # Cargo may not be on the shell's PATH: rustup.rs installs to ~/.cargo/bin,
 # Homebrew's keg-only rustup to /opt/homebrew/opt/rustup/bin.
 if ! command -v cargo >/dev/null 2>&1; then
@@ -29,7 +31,7 @@ fi
 
 if command -v npm >/dev/null 2>&1; then
   step "Frontend: install + build"
-  (cd frontend && { [ -d node_modules ] || npm install --no-fund --no-audit; } && npm run build) \
+  (cd frontend && npm run build) \
     || fail "frontend build"
 else
   fail "npm not found — install Node.js"
@@ -37,13 +39,8 @@ fi
 
 if command -v python3 >/dev/null 2>&1; then
   step "Python: mcp_server tests"
-  # mcp_server has real dependencies (mcp SDK, httpx) since Impl Plan M8 —
-  # isolated in a project-local venv rather than the system interpreter,
-  # since system pip on this machine (Homebrew) refuses global installs.
   (
     cd mcp_server \
-      && { [ -d .venv ] || python3 -m venv .venv; } \
-      && .venv/bin/pip install --quiet -e . \
       && .venv/bin/python -m unittest discover -s tests -v
   ) || fail "python tests"
 else

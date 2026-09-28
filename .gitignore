@@ -221,3 +221,6 @@ __marimo__/
 
 # Prompt journals belong in the private attention project, not this public repo.
 Journal/
+
+# Upgrade tooling bootstrapped by local builds.
+Claude/.local-build-tools/
