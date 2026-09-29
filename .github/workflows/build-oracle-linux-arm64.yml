@@ -24,10 +24,10 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: Claude/frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Build frontend
-        working-directory: Claude/frontend
+        working-directory: frontend
         run: |
           npm ci --no-audit --no-fund
           npm run build
@@ -41,7 +41,7 @@ jobs:
         run: |
           python -m venv /tmp/fpa-mcp-venv
           /tmp/fpa-mcp-venv/bin/pip install uv==0.12.19
-          cd Claude/mcp_server
+          cd mcp_server
           /tmp/fpa-mcp-venv/bin/uv run --locked python -m unittest discover -s tests -v
 
       - name: Verify and build Rust backend in Oracle Linux 9
@@ -54,10 +54,10 @@ jobs:
           echo "FPA_BUILDER_IMAGE=$builder_image" >> "$GITHUB_ENV"
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/src:rw" \
-            --workdir /src/Claude \
+            --workdir /src \
             --env HOME=/tmp \
             --env RUST_TOOLCHAIN \
-            --env CARGO_TARGET_DIR=/src/Claude/target \
+            --env CARGO_TARGET_DIR=/src/target \
             "$builder_image" \
             bash -euo pipefail -c '
               microdnf install -y ca-certificates cmake curl gcc gcc-c++ git make perl tar gzip
@@ -86,12 +86,12 @@ jobs:
 
           mkdir -p "$package_dir/frontend"
           install -m 0755 \
-            "Claude/target/${TARGET}/release/ledgerzero-backend" \
+            "target/${TARGET}/release/ledgerzero-backend" \
             "$package_dir/ledgerzero-backend"
-          cp -R Claude/frontend/dist "$package_dir/frontend/dist"
-          cp Claude/server.config.example.toml "$package_dir/"
-          cp Claude/docs/LedgerZero_Run_and_Deploy.md "$package_dir/DEPLOY.md"
-          cp Claude/scripts/ledgerzero.service.example "$package_dir/"
+          cp -R frontend/dist "$package_dir/frontend/dist"
+          cp server.config.example.toml "$package_dir/"
+          cp docs/LedgerZero_Run_and_Deploy.md "$package_dir/DEPLOY.md"
+          cp scripts/ledgerzero.service.example "$package_dir/"
           printf 'FPA release from commit %s\nTarget: %s\nSee DEPLOY.md before installation.\n' \
             "$GITHUB_SHA" "$TARGET" > "$package_dir/README.txt"
 

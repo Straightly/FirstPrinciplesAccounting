@@ -1,1 +1,0 @@
-"""First Principle Accounting package."""

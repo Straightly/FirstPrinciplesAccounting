@@ -209,7 +209,7 @@ Partially pre-done during M0/M1: `scripts/package.sh` (release tarball) and `doc
 
 ## M10.1 — Change owner workflow ✅ DONE (2026-08-10)
 
-Added the launcher-native Change owner workflow in the Claude Lane. The current book owner alone can transfer ownership; the engine records an immutable `BookOwnerChanged` administrative event, storage rewraps the live book key for the successor's passphrase, book metadata and all book-scoped authorization switch immediately, and the old passphrase no longer opens the current book. The successor can discover, close, reopen, back up, and administer the book as its current owner. Historical backups remain readable with the passphrase that wrapped their historical keystore, which is explicitly documented. Covered end to end by `backend/tests/ownership_flow.rs`; the full Rust suite and frontend production build pass.
+Added the launcher-native Change owner workflow. The current book owner alone can transfer ownership; the engine records an immutable `BookOwnerChanged` administrative event, storage rewraps the live book key for the successor's passphrase, book metadata and all book-scoped authorization switch immediately, and the old passphrase no longer opens the current book. The successor can discover, close, reopen, back up, and administer the book as its current owner. Historical backups remain readable with the passphrase that wrapped their historical keystore, which is explicitly documented. Covered end to end by `backend/tests/ownership_flow.rs`; the full Rust suite and frontend production build pass.
 
 ## Phase 2 — Periods/reconciliation and sub-books/consolidation (deferred until Phase 1 is in real use)
 
