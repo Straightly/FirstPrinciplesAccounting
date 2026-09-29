@@ -24,6 +24,10 @@ bootstrap_owner_email = "zhian.job@gmail.com"
 # Session lifetime in seconds (spec §5.2: short-lived, 1 hour).
 session_ttl_seconds = 3600
 
+# Set true for every HTTPS deployment. The backend defaults to true when this
+# setting is omitted; false is only for the local HTTP development example.
+secure_session_cookies = false
+
 # Authentication domains (Theorems T2/T3 in docs/LedgerZero_Theorems.md).
 # Each domain is a pure data record; add more [[auth_providers]] blocks for
 # Microsoft, an enterprise IdP, etc. Providers with an empty client_id are

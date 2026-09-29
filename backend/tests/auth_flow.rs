@@ -14,6 +14,17 @@ use tower::ServiceExt;
 
 const OWNER: &str = "zhian.job@gmail.com";
 
+#[test]
+fn secure_cookies_default_on_when_not_explicitly_overridden() {
+    let example = include_str!("../../server.config.example.toml");
+    let local: ServerConfig = toml::from_str(example).unwrap();
+    assert!(!local.secure_session_cookies);
+
+    let production = example.replace("secure_session_cookies = false", "");
+    let production: ServerConfig = toml::from_str(&production).unwrap();
+    assert!(production.secure_session_cookies);
+}
+
 fn provider_config(id: &str) -> AuthProviderConfig {
     AuthProviderConfig {
         id: id.to_string(),
@@ -39,6 +50,7 @@ fn test_state() -> (Arc<AppState>, std::path::PathBuf) {
         ops_audit_log: audit_path.to_string_lossy().to_string(),
         bootstrap_owner_email: OWNER.to_string(),
         session_ttl_seconds: 3600,
+        secure_session_cookies: false,
         auth_providers: vec![provider_config("google")],
         dev_login: DevLoginConfig { enabled: true },
     };
@@ -63,6 +75,15 @@ fn session_cookie(response: &axum::response::Response) -> String {
         .to_str()
         .unwrap();
     set_cookie.split(';').next().unwrap().to_string()
+}
+
+fn set_cookie_header(response: &axum::response::Response) -> &str {
+    response
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("Set-Cookie present")
+        .to_str()
+        .unwrap()
 }
 
 async fn dev_login(app: &Router, email: &str) -> (String, Value) {
@@ -205,6 +226,55 @@ async fn logout_revokes_session() {
 
     let after = get_with_cookie(&app, "/api/auth/me", &cookie).await;
     assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn secure_cookie_policy_applies_to_login_refresh_and_logout() {
+    let (state, _) = test_state();
+    let mut config = state.config.clone();
+    config.secure_session_cookies = true;
+    let app = build_router(Arc::new(AppState::new(config)));
+
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/dev-login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "email": OWNER }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(set_cookie_header(&login).contains("; Secure"));
+    assert!(set_cookie_header(&login).contains("; HttpOnly"));
+    let cookie = session_cookie(&login);
+
+    let refresh = post_with_cookie(&app, "/api/auth/refresh", &cookie).await;
+    assert!(set_cookie_header(&refresh).contains("; Secure"));
+    let refreshed_cookie = session_cookie(&refresh);
+
+    let logout = post_with_cookie(&app, "/api/auth/logout", &refreshed_cookie).await;
+    assert!(set_cookie_header(&logout).contains("; Secure"));
+    assert!(set_cookie_header(&logout).contains("Max-Age=0"));
+}
+
+#[tokio::test]
+async fn local_http_cookie_policy_omits_secure() {
+    let (app, _) = app();
+    let login = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/dev-login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "email": OWNER }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!set_cookie_header(&login).contains("; Secure"));
 }
 
 #[tokio::test]

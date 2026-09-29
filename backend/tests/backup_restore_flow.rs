@@ -29,6 +29,7 @@ fn test_config(books_dir: &std::path::Path, dev_artifacts_dir: &std::path::Path)
         ops_audit_log: audit_path.to_string_lossy().to_string(),
         bootstrap_owner_email: OWNER.to_string(),
         session_ttl_seconds: 3600,
+        secure_session_cookies: false,
         auth_providers: vec![],
         dev_login: DevLoginConfig { enabled: true },
     }

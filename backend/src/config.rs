@@ -57,6 +57,9 @@ pub struct ServerConfig {
     pub bootstrap_owner_email: String,
     #[serde(default = "default_session_ttl")]
     pub session_ttl_seconds: u64,
+    /// Keep session cookies on HTTPS. Local HTTP development may opt out.
+    #[serde(default = "default_secure_session_cookies")]
+    pub secure_session_cookies: bool,
     /// Authentication domains registered at startup. More can be added at
     /// runtime through the provider registry (Theorem T3).
     #[serde(default)]
@@ -67,6 +70,10 @@ pub struct ServerConfig {
 
 fn default_session_ttl() -> u64 {
     3600
+}
+
+fn default_secure_session_cookies() -> bool {
+    true
 }
 
 fn default_dev_artifacts_dir() -> String {

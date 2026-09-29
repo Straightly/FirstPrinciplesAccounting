@@ -127,6 +127,10 @@ cross-compile / build in CI) for real remote deployments.
 Required config changes on a remote machine:
 
 - `[dev_login] enabled = false` — **never** on anything network-reachable.
+- `secure_session_cookies = true` for HTTPS deployments. The server defaults
+  to `true` if this is omitted; the packaged example uses `false` only so
+  local HTTP development works. Login, refresh, and logout all use the same
+  cookie policy.
 - `listen_addr = "127.0.0.1:8080"` and put nginx/Caddy in front for TLS.
   Google OAuth requires HTTPS redirect URIs on non-localhost hosts.
 - `redirect_url` in each `[[auth_providers]]` block must match the public

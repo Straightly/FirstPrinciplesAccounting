@@ -36,18 +36,26 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-fn with_session_cookie(mut response: Response, token: &str, ttl_seconds: u64) -> Response {
-    // Note for non-local deployments: add "; Secure" once served over HTTPS.
-    let cookie =
-        format!("{SESSION_COOKIE}={token}; HttpOnly; Path=/; Max-Age={ttl_seconds}; SameSite=Lax");
+fn with_session_cookie(
+    mut response: Response,
+    token: &str,
+    ttl_seconds: u64,
+    secure: bool,
+) -> Response {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    let cookie = format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; Path=/; Max-Age={ttl_seconds}; SameSite=Lax{secure_attr}"
+    );
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
     response
 }
 
-fn clear_session_cookie(mut response: Response) -> Response {
-    let cookie = format!("{SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax");
+fn clear_session_cookie(mut response: Response, secure: bool) -> Response {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    let cookie =
+        format!("{SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax{secure_attr}");
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -240,6 +248,7 @@ pub async fn provider_callback(
         response,
         &token,
         state.config.session_ttl_seconds,
+        state.config.secure_session_cookies,
     ))
 }
 
@@ -282,6 +291,7 @@ pub async fn dev_login(
         response,
         &token,
         state.config.session_ttl_seconds,
+        state.config.secure_session_cookies,
     ))
 }
 
@@ -307,6 +317,7 @@ pub async fn refresh(
         response,
         &new_token,
         state.config.session_ttl_seconds,
+        state.config.secure_session_cookies,
     ))
 }
 
@@ -320,7 +331,7 @@ pub async fn logout(State(state): State<SharedState>, headers: HeaderMap) -> Res
         Json(serde_json::json!({ "logged_out": true })),
     )
         .into_response();
-    clear_session_cookie(response)
+    clear_session_cookie(response, state.config.secure_session_cookies)
 }
 
 /// GET /api/admin/ping — owner-gated skeleton endpoint proving authorization
