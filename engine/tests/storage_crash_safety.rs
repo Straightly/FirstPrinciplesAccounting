@@ -69,8 +69,8 @@ async fn round_trip_create_persist_reopen_replay_matches() {
     assert_eq!(reopened.state(), fx.engine.state());
     assert_eq!(reopened.audit_log().len(), fx.engine.audit_log().len());
 
-    // §3.3: the book folder is a git repo, committed to after each batch —
-    // one commit for `create` (0 events) and one for the persist above.
+    // §3.3: the book folder is a git repo. Creation itself leaves no partial
+    // checkpoint; the caller's first persist makes one complete commit.
     assert!(
         dir.path().join(".git").exists(),
         "book folder must be a git repo"
@@ -84,8 +84,8 @@ async fn round_trip_create_persist_reopen_replay_matches() {
         .unwrap();
     let commit_count = String::from_utf8_lossy(&log.stdout).lines().count();
     assert_eq!(
-        commit_count, 2,
-        "expected one commit for create + one for persist"
+        commit_count, 1,
+        "expected the first persist to create one complete checkpoint"
     );
 }
 

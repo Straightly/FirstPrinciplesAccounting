@@ -82,7 +82,20 @@ fn now_ms() -> i64 {
 
 async fn write_meta(dir: &Path, meta: &BookMeta) -> Result<(), ApiError> {
     let json = serde_json::to_vec_pretty(meta).map_err(|e| ApiError::internal(e.to_string()))?;
-    tokio::fs::write(dir.join(META_FILE), json)
+    let path = dir.join(META_FILE);
+    let tmp_path = dir.join(format!("{META_FILE}.tmp"));
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    use tokio::io::AsyncWriteExt;
+    file.write_all(&json)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    file.sync_all()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    drop(file);
+    tokio::fs::rename(tmp_path, path)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))
 }
@@ -133,27 +146,57 @@ impl BooksRegistry {
         owner_email: &str,
         owner_user_id: Uuid,
     ) -> Result<BookMeta, ApiError> {
+        // Git is part of the local durability contract. Check it before a
+        // UUID directory is created so a missing runtime dependency cannot
+        // leave a partial book behind.
+        FileBookStore::ensure_git_available()
+            .await
+            .map_err(storage_err)?;
         let book_id = Uuid::new_v4();
         let dir = self.book_dir(book_id);
-        let provider = PassphraseKeyProvider::new(passphrase);
-        let store = FileBookStore::create(&dir, &provider)
-            .await
-            .map_err(storage_err)?;
-        let mut engine = AccountingEngine::new(book_id, Box::new(SystemClock));
-        let entity_id = engine.create_entity(Uuid::new_v4(), owner_user_id, &name)?;
-        let new_ids: Vec<Uuid> = engine.audit_log().iter().map(|e| e.event_id).collect();
-        store
-            .persist(engine.audit_log(), &new_ids)
-            .await
-            .map_err(storage_err)?;
-        let meta = BookMeta {
-            book_id,
-            name,
-            owner_email: owner_email.to_string(),
-            created_at_ms: now_ms(),
-            entity_id,
+        let created: Result<(BookMeta, AccountingEngine, FileBookStore), ApiError> = async {
+            let provider = PassphraseKeyProvider::new(passphrase);
+            let store = FileBookStore::create(&dir, &provider)
+                .await
+                .map_err(storage_err)?;
+            let mut engine = AccountingEngine::new(book_id, Box::new(SystemClock));
+            let entity_id = engine.create_entity(Uuid::new_v4(), owner_user_id, &name)?;
+            let meta = BookMeta {
+                book_id,
+                name,
+                owner_email: owner_email.to_string(),
+                created_at_ms: now_ms(),
+                entity_id,
+            };
+
+            // Metadata must exist before the first persist so the initial Git
+            // checkpoint is a complete, reopenable book rather than a partial
+            // storage skeleton.
+            write_meta(&dir, &meta).await?;
+            let new_ids: Vec<Uuid> = engine.audit_log().iter().map(|e| e.event_id).collect();
+            store
+                .persist(engine.audit_log(), &new_ids)
+                .await
+                .map_err(storage_err)?;
+            Ok((meta, engine, store))
+        }
+        .await;
+
+        let (meta, engine, store) = match created {
+            Ok(created) => created,
+            Err(error) => match tokio::fs::remove_dir_all(&dir).await {
+                Ok(()) => return Err(error),
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(error)
+                }
+                Err(cleanup) => {
+                    return Err(ApiError::internal(format!(
+                        "book creation failed ({}); partial book cleanup also failed: {cleanup}",
+                        error.message
+                    )))
+                }
+            },
         };
-        write_meta(&dir, &meta).await?;
         let open_book = Arc::new(OpenBook {
             meta: RwLock::new(meta.clone()),
             engine: RwLock::new(engine),
@@ -276,6 +319,11 @@ impl BooksRegistry {
         let mut updated = previous;
         updated.owner_email = new_owner_email.to_string();
         write_meta(open_book.store.dir(), &updated).await?;
+        open_book
+            .store
+            .checkpoint("book owner metadata updated")
+            .await
+            .map_err(storage_err)?;
         *open_book.meta.write().await = updated.clone();
         Ok(updated)
     }
@@ -363,7 +411,7 @@ impl BooksRegistry {
 }
 
 /// Runs a mutation against an open book's engine and, only if it appended
-/// new events, durably persists the whole log and best-effort commits the
+/// new events, durably persists the whole log and commits the
 /// backup git repo (Impl Spec §3.1, §3.3). Idempotent replays that append
 /// nothing skip the O(N) rewrite entirely.
 pub async fn mutate<T>(
@@ -385,4 +433,117 @@ pub async fn mutate<T>(
             .map_err(storage_err)?;
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ledgerzero_engine::domain::ResourceKind;
+    use ledgerzero_engine::engine::NewResourceType;
+    use serde_json::Value;
+
+    async fn git_output(dir: &Path, args: &[&str]) -> String {
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .await
+            .expect("git must run in the test book");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git output must be UTF-8")
+    }
+
+    #[tokio::test]
+    async fn failed_create_removes_partial_book_and_never_opens_it() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = BooksRegistry::new(root.path().to_str().unwrap());
+
+        let error = registry
+            .create(
+                "   ".to_string(),
+                "test-passphrase",
+                "owner@example.com",
+                Uuid::new_v4(),
+            )
+            .await
+            .expect_err("blank entity name must fail after storage bootstrap");
+
+        assert_eq!(error.error_code, "INVALID_INPUT");
+        assert!(registry.list_open().await.is_empty());
+        assert!(registry.list().await.unwrap().is_empty());
+        assert!(
+            std::fs::read_dir(root.path()).unwrap().next().is_none(),
+            "failed creation must remove its UUID directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_mutate_close_reopen_has_complete_clean_git_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = BooksRegistry::new(root.path().to_str().unwrap());
+        let actor = Uuid::new_v4();
+        let meta = registry
+            .create(
+                "L1 Local Test".to_string(),
+                "test-passphrase",
+                "owner@example.com",
+                actor,
+            )
+            .await
+            .unwrap();
+        let book_dir = root.path().join(meta.book_id.to_string());
+
+        let tracked = git_output(&book_dir, &["ls-tree", "-r", "--name-only", "HEAD"]).await;
+        for durable in [".gitignore", META_FILE, DATA_FILE, KEYSTORE_FILE] {
+            assert!(
+                tracked.lines().any(|line| line == durable),
+                "{durable} must be in the initial checkpoint"
+            );
+        }
+        assert!(!tracked.lines().any(|line| line == "book.lock"));
+
+        let open = registry.get_open(meta.book_id).await.unwrap();
+        mutate(&open, |engine| {
+            engine.create_resource_type(
+                Uuid::new_v4(),
+                actor,
+                NewResourceType {
+                    name: "US Dollar".into(),
+                    kind: ResourceKind::Currency,
+                    code: "USD".into(),
+                    unit_of_measure: "USD".into(),
+                    precision: 2,
+                    metadata: Value::Null,
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+        registry.close(meta.book_id).await;
+        assert!(registry.get_open(meta.book_id).await.is_err());
+        registry
+            .open(meta.book_id, "test-passphrase")
+            .await
+            .unwrap();
+        let reopened = registry.get_open(meta.book_id).await.unwrap();
+        assert_eq!(reopened.engine.read().await.list_resource_types().len(), 1);
+
+        assert_eq!(git_output(&book_dir, &["status", "--porcelain"]).await, "");
+        assert_eq!(
+            git_output(
+                &book_dir,
+                &["log", "--all", "--format=%H", "--", "book.lock"]
+            )
+            .await,
+            "",
+            "book.lock must never appear in Git history"
+        );
+    }
 }

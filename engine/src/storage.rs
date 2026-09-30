@@ -7,9 +7,9 @@
 //! book key wrapped for the owner's passphrase (Impl Spec §5.4). Every
 //! mutation batch rewrites the whole file via atomic replacement (temp +
 //! fsync + rename) under a writer lock, then commits the book folder to a
-//! local git repository used for backup/point-in-time recovery only —
-//! `book.data.enc` remains the sole source of truth (§3.1), so a git failure
-//! (e.g. `git` not installed) is logged, not fatal to durability.
+//! local git repository used for backup/point-in-time recovery only.
+//! `book.data.enc` remains the sole accounting source of truth (§3.1), while
+//! a successful API mutation also requires its local Git checkpoint.
 
 use crate::domain::EventRecord;
 use aes_gcm::aead::Aead;
@@ -29,6 +29,8 @@ use uuid::Uuid;
 pub const DATA_FILE: &str = "book.data.enc";
 pub const KEYSTORE_FILE: &str = "book.keystore.json";
 const LOCK_FILE: &str = "book.lock";
+const META_FILE: &str = "book.json";
+const GITIGNORE_FILE: &str = ".gitignore";
 const TMP_SUFFIX: &str = ".tmp";
 const BOOK_KEY_LEN: usize = 32;
 const GCM_NONCE_LEN: usize = 12;
@@ -329,8 +331,7 @@ async fn acquire_writer_lock(dir: &Path) -> Result<WriterLockGuard, StorageError
 }
 
 // ---------------------------------------------------------------------------
-// Git backup policy — Impl Spec §3.3 (best-effort: book.data.enc, not git,
-// is the sole source of truth per §3.1)
+// Git backup policy — Impl Spec §3.3
 // ---------------------------------------------------------------------------
 
 async fn run_git(dir: &Path, args: &[&str]) -> Result<std::process::Output, StorageError> {
@@ -343,6 +344,31 @@ async fn run_git(dir: &Path, args: &[&str]) -> Result<std::process::Output, Stor
         .map_err(|e| StorageError::Git(format!("failed to run git: {e}")))
 }
 
+fn require_git_success(
+    action: &str,
+    output: std::process::Output,
+) -> Result<std::process::Output, StorageError> {
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(StorageError::Git(if stderr.is_empty() {
+        format!("git {action} failed with {}", output.status)
+    } else {
+        format!("git {action} failed: {stderr}")
+    }))
+}
+
+async fn ensure_git_executable(program: &str) -> Result<(), StorageError> {
+    let output = tokio::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| StorageError::Git(format!("required git executable is unavailable: {e}")))?;
+    require_git_success("--version", output)?;
+    Ok(())
+}
+
 async fn git_init(dir: &Path) -> Result<(), StorageError> {
     if tokio::fs::try_exists(dir.join(".git"))
         .await
@@ -350,25 +376,74 @@ async fn git_init(dir: &Path) -> Result<(), StorageError> {
     {
         return Ok(());
     }
-    run_git(dir, &["init", "-q"]).await?;
-    run_git(dir, &["config", "user.email", "ledgerzero@local"]).await?;
-    run_git(dir, &["config", "user.name", "LedgerZero"]).await?;
+    require_git_success("init", run_git(dir, &["init", "-q"]).await?)?;
+    require_git_success(
+        "config user.email",
+        run_git(dir, &["config", "user.email", "ledgerzero@local"]).await?,
+    )?;
+    require_git_success(
+        "config user.name",
+        run_git(dir, &["config", "user.name", "LedgerZero"]).await?,
+    )?;
     Ok(())
 }
 
-/// Stages and commits the whole book folder. Returns `Ok(())` even when
-/// there is nothing to commit (persisting an unchanged log) or when `git`
-/// itself is unavailable — durability already happened in `book.data.enc`;
-/// this is backup, not the source of truth (§3.1, §3.3).
+/// Stages only durable book files and commits them. Transient locks and temp
+/// files never enter history. A missing or failing Git executable is reported
+/// to the caller instead of silently producing a book without checkpoints.
 async fn git_commit(dir: &Path, message: &str) -> Result<(), StorageError> {
-    if run_git(dir, &["add", "-A"]).await.is_err() {
-        return Ok(());
+    if !tokio::fs::try_exists(dir.join(GITIGNORE_FILE))
+        .await
+        .unwrap_or(false)
+    {
+        tokio::fs::write(
+            dir.join(GITIGNORE_FILE),
+            format!("{LOCK_FILE}\n*{TMP_SUFFIX}\n"),
+        )
+        .await?;
     }
-    match run_git(dir, &["commit", "-q", "-m", message]).await {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(_) => Ok(()),  // most commonly "nothing to commit"; not fatal either way
-        Err(_) => Ok(()), // git not installed; backup is best-effort
+    let mut durable_files = vec![GITIGNORE_FILE, DATA_FILE, KEYSTORE_FILE];
+    if tokio::fs::try_exists(dir.join(META_FILE))
+        .await
+        .unwrap_or(false)
+    {
+        durable_files.push(META_FILE);
     }
+    let mut add_args = vec!["add", "--"];
+    add_args.extend(durable_files);
+    require_git_success("add", run_git(dir, &add_args).await?)?;
+    require_git_success(
+        "rm cached book.lock",
+        run_git(
+            dir,
+            &[
+                "rm",
+                "--cached",
+                "--ignore-unmatch",
+                "--quiet",
+                "--",
+                LOCK_FILE,
+            ],
+        )
+        .await?,
+    )?;
+
+    let staged = run_git(dir, &["diff", "--cached", "--quiet"]).await?;
+    match staged.status.code() {
+        Some(0) => return Ok(()),
+        Some(1) => {}
+        _ => {
+            return Err(StorageError::Git(format!(
+                "git diff --cached failed: {}",
+                String::from_utf8_lossy(&staged.stderr).trim()
+            )))
+        }
+    }
+    require_git_success(
+        "commit",
+        run_git(dir, &["commit", "-q", "-m", message]).await?,
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +459,7 @@ pub trait BookStorage: Send + Sync {
     async fn load(&self) -> Result<Vec<EventRecord>, StorageError>;
 
     /// Rewrites the whole encrypted log (O(N) per mutation, per §3.1) and
-    /// best-effort commits the book folder to its backup git repo.
+    /// commits the durable book files to its backup git repo.
     /// `new_event_ids` is used only for the commit message.
     async fn persist(
         &self,
@@ -404,6 +479,19 @@ impl FileBookStore {
         &self.dir
     }
 
+    /// Fails before book creation starts when the required Git runtime is
+    /// unavailable or unusable.
+    pub async fn ensure_git_available() -> Result<(), StorageError> {
+        ensure_git_executable("git").await
+    }
+
+    /// Checkpoints durable metadata updates made by the registry after an
+    /// earlier encrypted-data/key mutation.
+    pub async fn checkpoint(&self, message: &str) -> Result<(), StorageError> {
+        git_init(&self.dir).await?;
+        git_commit(&self.dir, message).await
+    }
+
     /// Rewraps the already-open in-memory book key for a successor owner.
     /// Book data is not decrypted/re-encrypted and the raw key never leaves
     /// this storage boundary.
@@ -419,7 +507,8 @@ impl FileBookStore {
 
     /// Bootstraps a brand-new book folder: random book key wrapped for the
     /// given key provider, an empty encrypted event log, and a fresh backup
-    /// git repository with an initial commit.
+    /// Git repository. The caller's first persist creates the initial complete
+    /// checkpoint after `book.json` has also been written.
     pub async fn create(
         dir: &Path,
         key_provider: &dyn BookKeyProvider,
@@ -449,8 +538,13 @@ impl FileBookStore {
         let encrypted = encrypt_events(&store.book_key, &empty)?;
         atomic_write(&store.dir.join(DATA_FILE), &encrypted).await?;
 
+        tokio::fs::write(
+            store.dir.join(GITIGNORE_FILE),
+            format!("{LOCK_FILE}\n*{TMP_SUFFIX}\n"),
+        )
+        .await?;
+
         git_init(&store.dir).await?;
-        git_commit(&store.dir, "book created (0 events)").await?;
         Ok(store)
     }
 
@@ -487,9 +581,11 @@ impl BookStorage for FileBookStore {
         all_events: &[EventRecord],
         new_event_ids: &[Uuid],
     ) -> Result<(), StorageError> {
-        let _lock = acquire_writer_lock(&self.dir).await?;
-        let encrypted = encrypt_events(&self.book_key, all_events)?;
-        atomic_write(&self.dir.join(DATA_FILE), &encrypted).await?;
+        {
+            let _lock = acquire_writer_lock(&self.dir).await?;
+            let encrypted = encrypt_events(&self.book_key, all_events)?;
+            atomic_write(&self.dir.join(DATA_FILE), &encrypted).await?;
+        }
         let message = if new_event_ids.is_empty() {
             format!("mutation batch ({} events total)", all_events.len())
         } else {
@@ -503,5 +599,21 @@ impl BookStorage for FileBookStore {
         git_init(&self.dir).await?;
         git_commit(&self.dir, &message).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_git_runtime_returns_a_clear_error() {
+        let result = ensure_git_executable("ledgerzero-test-git-that-does-not-exist").await;
+        match result {
+            Err(StorageError::Git(message)) => {
+                assert!(message.contains("required git executable is unavailable"));
+            }
+            other => panic!("expected a clear Git dependency error, got {other:?}"),
+        }
     }
 }

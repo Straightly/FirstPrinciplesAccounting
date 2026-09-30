@@ -183,4 +183,18 @@ async fn change_owner_transfers_authority_and_rewraps_the_book_key() {
     )
     .await;
     assert_eq!(reopened.status(), StatusCode::OK);
+
+    let git_status = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path().join(book_id))
+        .args(["status", "--porcelain"])
+        .output()
+        .await
+        .unwrap();
+    assert!(git_status.status.success());
+    assert_eq!(
+        String::from_utf8(git_status.stdout).unwrap(),
+        "",
+        "a successful owner transfer must checkpoint updated book.json"
+    );
 }
