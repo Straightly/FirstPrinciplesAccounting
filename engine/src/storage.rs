@@ -196,9 +196,9 @@ impl BookKeyProvider for PassphraseKeyProvider {
             .map_err(|e| StorageError::Crypto(format!("bad wrap key: {e}")))?;
         let mut nonce_bytes = [0u8; GCM_NONCE_LEN];
         fill_random(&mut nonce_bytes)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
         let ciphertext = cipher
-            .encrypt(nonce, book_key.as_slice())
+            .encrypt(&nonce, book_key.as_slice())
             .map_err(|_| StorageError::Crypto("book key wrap failed".into()))?;
         Ok(KeystoreFile {
             version: 1,
@@ -232,10 +232,11 @@ impl BookKeyProvider for PassphraseKeyProvider {
         if nonce_bytes.len() != GCM_NONCE_LEN {
             return Err(StorageError::Corrupt("wrap nonce has wrong length".into()));
         }
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes.as_slice())
+            .map_err(|_| StorageError::Corrupt("wrap nonce has wrong length".into()))?;
         let ciphertext = from_hex(&keystore.wrapped_key_hex)?;
         let plaintext = cipher
-            .decrypt(nonce, ciphertext.as_slice())
+            .decrypt(&nonce, ciphertext.as_slice())
             .map_err(|_| StorageError::Crypto("wrong passphrase or corrupt keystore".into()))?;
         plaintext
             .try_into()
@@ -256,9 +257,9 @@ fn encrypt_events(
         .map_err(|e| StorageError::Crypto(format!("bad book key: {e}")))?;
     let mut nonce_bytes = [0u8; GCM_NONCE_LEN];
     fill_random(&mut nonce_bytes)?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_slice())
+        .encrypt(&nonce, plaintext.as_slice())
         .map_err(|_| StorageError::Crypto("book encryption failed".into()))?;
     let mut out = Vec::with_capacity(GCM_NONCE_LEN + ciphertext.len());
     out.extend_from_slice(&nonce_bytes);
@@ -276,8 +277,9 @@ fn decrypt_events(
     let (nonce_bytes, ciphertext) = data.split_at(GCM_NONCE_LEN);
     let cipher = Aes256Gcm::new_from_slice(book_key)
         .map_err(|e| StorageError::Crypto(format!("bad book key: {e}")))?;
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+    let nonce = Nonce::try_from(nonce_bytes)
+        .map_err(|_| StorageError::Corrupt("book nonce has wrong length".into()))?;
+    let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|_| {
         StorageError::Crypto("book decryption failed (wrong key or corrupt file)".into())
     })?;
     serde_json::from_slice(&plaintext).map_err(|e| StorageError::Corrupt(e.to_string()))
