@@ -43,3 +43,26 @@ deployment.
 
 Frontend development with hot reload: `cd frontend && npm run dev` (proxies
 `/api` to the backend on :8080).
+
+## Persistent local staging on macOS
+
+Deploy a packaged copy outside the source checkout:
+
+```bash
+./scripts/local-staging.sh build-deploy
+```
+
+This uses the committed dependency lockfiles, installs under
+`~/Deployments/FPA-Staging`, preserves configuration/data outside the
+replaceable application directory, starts the backend on `127.0.0.1:8081`,
+and checks its health. The first run creates
+`~/Deployments/FPA-Staging/config/server.config.toml`; add the localhost
+Google OAuth credentials there before testing sign-in, then restart with:
+
+```bash
+~/Deployments/FPA-Staging/deploy/fpa-stage restart
+```
+
+The copied `fpa-stage` command also supports `status`, `logs`, `stop`,
+`start`, and `redeploy`. `redeploy` deletes/replaces only `app/`; it leaves
+`config/`, `data/`, `logs/`, `artifacts/`, and `deploy/` intact.

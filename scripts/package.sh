@@ -3,12 +3,28 @@
 # Produces dist/ledgerzero-<version>.tar.gz containing the release binary,
 # built frontend assets, and the example config. No git repo or toolchain is
 # needed on the target machine.
-# Run from the repository root: ./scripts/package.sh
+# Run from the repository root: ./scripts/package.sh [--locked]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-bash ./scripts/upgrade-deps.sh
+LOCKED_BUILD=false
+case "${1:-}" in
+  --locked)
+    LOCKED_BUILD=true
+    shift
+    ;;
+  "") ;;
+  *)
+    echo "usage: $0 [--locked]" >&2
+    exit 1
+    ;;
+esac
+[[ $# -eq 0 ]] || { echo "usage: $0 [--locked]" >&2; exit 1; }
+
+if [[ "$LOCKED_BUILD" == false ]]; then
+  bash ./scripts/upgrade-deps.sh
+fi
 
 # Cargo may not be on the shell's PATH: rustup.rs installs to ~/.cargo/bin,
 # Homebrew's keg-only rustup to /opt/homebrew/opt/rustup/bin.
@@ -27,7 +43,11 @@ NAME="ledgerzero-${VERSION}-${STAMP}"
 STAGE="dist/${NAME}"
 
 echo "== Building release binary =="
-cargo build --release -p ledgerzero-backend
+if [[ "$LOCKED_BUILD" == true ]]; then
+  cargo build --locked --release -p ledgerzero-backend
+else
+  cargo build --release -p ledgerzero-backend
+fi
 
 echo "== Building frontend =="
 (cd frontend && npm run build)
@@ -39,6 +59,24 @@ cp target/release/ledgerzero-backend "$STAGE/"
 cp -R frontend/dist "$STAGE/frontend/dist"
 cp server.config.example.toml "$STAGE/"
 cp docs/LedgerZero_Run_and_Deploy.md "$STAGE/DEPLOY.md"
+
+GIT_REVISION=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
+if git diff --quiet --ignore-submodules HEAD -- 2>/dev/null && \
+   [[ -z "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+  GIT_STATE=clean
+else
+  GIT_STATE=dirty
+fi
+
+cat > "$STAGE/BUILD-INFO.txt" <<EOF
+version=${VERSION}
+packaged_at=${STAMP}
+git_revision=${GIT_REVISION}
+git_state=${GIT_STATE}
+build_os=$(uname -s)
+build_arch=$(uname -m)
+locked_build=${LOCKED_BUILD}
+EOF
 
 cat > "$STAGE/README.txt" <<EOF
 LedgerZero ${VERSION} (packaged ${STAMP})
