@@ -35,6 +35,17 @@ pub struct BookMeta {
     /// M7); carried here so callers never need a separate discovery round
     /// trip to learn it.
     pub entity_id: Uuid,
+    /// A durable two-party ownership handoff. The old owner remains the
+    /// owner until acceptance, but every ordinary book operation is frozen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_owner_transfer: Option<PendingOwnerTransfer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingOwnerTransfer {
+    pub transfer_id: Uuid,
+    pub new_owner_email: String,
+    pub initiated_at_ms: i64,
 }
 
 /// An open book: the live engine plus the storage handle that persists it.
@@ -167,6 +178,7 @@ impl BooksRegistry {
                 owner_email: owner_email.to_string(),
                 created_at_ms: now_ms(),
                 entity_id,
+                pending_owner_transfer: None,
             };
 
             // Metadata must exist before the first persist so the initial Git
@@ -282,53 +294,207 @@ impl BooksRegistry {
         self.open.read().await.values().cloned().collect()
     }
 
-    /// Runs the Change owner workflow as one serialized book operation:
-    /// append its audit event, persist it, rewrap the book key, then publish
-    /// the new owner in book metadata and live authorization state.
-    pub async fn change_owner(
+    pub async fn initiate_owner_transfer(
         &self,
         open_book: &OpenBook,
+        transfer_id: Uuid,
+        new_owner_email: &str,
+        current_passphrase: &str,
+    ) -> Result<BookMeta, ApiError> {
+        let previous = open_book.meta.read().await.clone();
+        // Serialize initiation and idempotent retries with mutations and
+        // successor acceptance.
+        let _engine = open_book.engine.write().await;
+        if let Some(pending) = &previous.pending_owner_transfer {
+            if pending.transfer_id == transfer_id
+                && pending
+                    .new_owner_email
+                    .eq_ignore_ascii_case(new_owner_email)
+            {
+                open_book
+                    .store
+                    .verify_key_provider(&PassphraseKeyProvider::new(current_passphrase))
+                    .await
+                    .map_err(storage_err)?;
+                return Ok(previous);
+            }
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "BOOK_TRANSFER_PENDING",
+                "book already has a different pending ownership transfer",
+            ));
+        }
+        // Serialize with all mutations and prove knowledge of the current
+        // book passphrase. The passphrase is never retained.
+        open_book
+            .store
+            .verify_key_provider(&PassphraseKeyProvider::new(current_passphrase))
+            .await
+            .map_err(storage_err)?;
+        let mut updated = previous.clone();
+        updated.pending_owner_transfer = Some(PendingOwnerTransfer {
+            transfer_id,
+            new_owner_email: new_owner_email.to_string(),
+            initiated_at_ms: now_ms(),
+        });
+        write_meta(open_book.store.dir(), &updated).await?;
+        if let Err(error) = open_book
+            .store
+            .checkpoint("book ownership transfer initiated")
+            .await
+        {
+            let _ = write_meta(open_book.store.dir(), &previous).await;
+            let _ = open_book
+                .store
+                .checkpoint("roll back failed ownership transfer initiation")
+                .await;
+            return Err(storage_err(error));
+        }
+        *open_book.meta.write().await = updated.clone();
+        Ok(updated)
+    }
+
+    pub async fn cancel_owner_transfer(
+        &self,
+        open_book: &OpenBook,
+        current_passphrase: &str,
+    ) -> Result<BookMeta, ApiError> {
+        let previous = open_book.meta.read().await.clone();
+        let _engine = open_book.engine.write().await;
+        open_book
+            .store
+            .verify_key_provider(&PassphraseKeyProvider::new(current_passphrase))
+            .await
+            .map_err(storage_err)?;
+        if previous.pending_owner_transfer.is_none() {
+            return Ok(previous);
+        }
+        let mut updated = previous.clone();
+        updated.pending_owner_transfer = None;
+        write_meta(open_book.store.dir(), &updated).await?;
+        if let Err(error) = open_book
+            .store
+            .checkpoint("book ownership transfer cancelled")
+            .await
+        {
+            let _ = write_meta(open_book.store.dir(), &previous).await;
+            let _ = open_book
+                .store
+                .checkpoint("roll back failed ownership transfer cancellation")
+                .await;
+            return Err(storage_err(error));
+        }
+        *open_book.meta.write().await = updated.clone();
+        Ok(updated)
+    }
+
+    /// Accepts a pending transfer by building a complete replacement book
+    /// folder under a fresh random book key, wrapped by the successor's new
+    /// passphrase. The replacement is validated before the live directory is
+    /// swapped; the logical book and entity ids remain unchanged.
+    pub async fn accept_owner_transfer(
+        &self,
+        open_book: Arc<OpenBook>,
         op_id: Uuid,
         actor_user_id: Uuid,
-        new_owner_email: &str,
         new_passphrase: &str,
     ) -> Result<BookMeta, ApiError> {
         let previous = open_book.meta.read().await.clone();
-        let mut engine = open_book.engine.write().await;
-        let before = engine.audit_log().len();
-        engine.change_owner(
+        let pending = previous.pending_owner_transfer.clone().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "NO_PENDING_TRANSFER",
+                "book has no pending ownership transfer",
+            )
+        })?;
+        let engine_guard = open_book.engine.write().await;
+        let state = EngineState::replay(previous.book_id, engine_guard.audit_log())
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let mut replacement_engine = AccountingEngine::from_state(state, Box::new(SystemClock));
+        replacement_engine.change_owner(
             op_id,
             actor_user_id,
             previous.owner_email.clone(),
-            new_owner_email.to_string(),
+            pending.new_owner_email.clone(),
         )?;
-        let new_ids: Vec<Uuid> = engine.audit_log()[before..]
-            .iter()
-            .map(|event| event.event_id)
-            .collect();
-        if !new_ids.is_empty() {
-            open_book
-                .store
-                .persist(engine.audit_log(), &new_ids)
-                .await
-                .map_err(storage_err)?;
-            let provider = PassphraseKeyProvider::new(new_passphrase);
-            open_book
-                .store
-                .rewrap_key(&provider)
-                .await
-                .map_err(storage_err)?;
+
+        let provider = PassphraseKeyProvider::new(new_passphrase);
+        let live_dir = self.book_dir(previous.book_id);
+        let temporary = self
+            .dir
+            .join(format!(".{}-transfer-new-{op_id}", previous.book_id));
+        let retired = self
+            .dir
+            .join(format!(".{}-transfer-old-{op_id}", previous.book_id));
+        if temporary.exists() || retired.exists() {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "TRANSFER_FILES_EXIST",
+                "ownership transfer staging files already exist; operator review is required",
+            ));
         }
-        drop(engine);
         let mut updated = previous;
-        updated.owner_email = new_owner_email.to_string();
-        write_meta(open_book.store.dir(), &updated).await?;
-        open_book
-            .store
-            .checkpoint("book owner metadata updated")
+        updated.owner_email = pending.new_owner_email;
+        updated.pending_owner_transfer = None;
+
+        let prepared: Result<(), ApiError> = async {
+            let replacement_store = FileBookStore::create(&temporary, &provider)
+                .await
+                .map_err(storage_err)?;
+            write_meta(&temporary, &updated).await?;
+            replacement_store
+                .persist(replacement_engine.audit_log(), &[op_id])
+                .await
+                .map_err(storage_err)?;
+            let (_, events) = FileBookStore::open(&temporary, &provider)
+                .await
+                .map_err(storage_err)?;
+            EngineState::replay(updated.book_id, &events)
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = prepared {
+            let _ = tokio::fs::remove_dir_all(&temporary).await;
+            return Err(error);
+        }
+
+        tokio::fs::rename(&live_dir, &retired)
+            .await
+            .map_err(|error| ApiError::internal(format!("cannot stage current book: {error}")))?;
+        if let Err(error) = tokio::fs::rename(&temporary, &live_dir).await {
+            let _ = tokio::fs::rename(&retired, &live_dir).await;
+            return Err(ApiError::internal(format!(
+                "cannot activate successor's encrypted book copy: {error}"
+            )));
+        }
+        if let Err(error) = tokio::fs::remove_dir_all(&retired).await {
+            let rejected = self
+                .dir
+                .join(format!(".{}-transfer-rejected-{op_id}", updated.book_id));
+            let _ = tokio::fs::rename(&live_dir, &rejected).await;
+            let _ = tokio::fs::rename(&retired, &live_dir).await;
+            let _ = tokio::fs::remove_dir_all(&rejected).await;
+            return Err(ApiError::internal(format!(
+                "could not retire the prior encrypted book copy; transfer was rolled back: {error}"
+            )));
+        }
+
+        let (replacement_store, events) = FileBookStore::open(&live_dir, &provider)
             .await
             .map_err(storage_err)?;
-        *open_book.meta.write().await = updated.clone();
+        let replacement_state = EngineState::replay(updated.book_id, &events)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let replacement = Arc::new(OpenBook {
+            meta: RwLock::new(updated.clone()),
+            engine: RwLock::new(AccountingEngine::from_state(
+                replacement_state,
+                Box::new(SystemClock),
+            )),
+            store: replacement_store,
+        });
+        self.open.write().await.insert(updated.book_id, replacement);
+        drop(engine_guard);
         Ok(updated)
     }
 
@@ -389,6 +555,15 @@ impl BooksRegistry {
                 "book is currently open in this process; close it before restoring over it",
             ));
         }
+        if let Ok(current) = read_meta(&self.book_dir(meta.book_id)).await {
+            if current.pending_owner_transfer.is_some() {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "BOOK_TRANSFER_PENDING",
+                    "book cannot be restored over while its ownership transfer is pending",
+                ));
+            }
+        }
         for name in [DATA_FILE, KEYSTORE_FILE] {
             if !tokio::fs::try_exists(location.join(name))
                 .await
@@ -423,6 +598,13 @@ pub async fn mutate<T>(
     f: impl FnOnce(&mut AccountingEngine) -> Result<T, EngineError>,
 ) -> Result<T, ApiError> {
     let mut engine = open_book.engine.write().await;
+    if open_book.meta.read().await.pending_owner_transfer.is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "BOOK_TRANSFER_PENDING",
+            "book is frozen while its ownership transfer is pending",
+        ));
+    }
     let before = engine.audit_log().len();
     let value = f(&mut engine)?;
     let new_ids: Vec<Uuid> = engine.audit_log()[before..]

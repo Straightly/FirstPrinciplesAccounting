@@ -310,23 +310,35 @@ deployment, not just developing against one.
 
 ### Ownership transfer
 
-Use the launcher's **Change owner** workflow while the book is open. Enter
-the successor's authenticated email and a new passphrase for them. The
-workflow records an immutable `BOOK_OWNER_CHANGED` administrative event,
-rewraps the in-memory book key under the successor's passphrase, updates the
-book metadata, and removes the former owner's book authority immediately.
+Use the launcher's **Ownership** view while the book is open:
 
-The successor should sign in, confirm the book appears in **My workflows**,
-close it, and reopen it with the new passphrase. The former owner's old
-passphrase no longer opens the current book.
+1. The current owner enters the successor's authenticated email and the
+   current book passphrase. The field starts blank. Successful verification
+   freezes the book in `transferring`; no other book operation is allowed.
+2. The successor signs in separately, selects the transferring book, chooses
+   and confirms a new passphrase, and accepts. The backend builds and validates
+   a complete copy under a fresh random book key wrapped by that passphrase,
+   records `BOOK_OWNER_CHANGED`, swaps the copy into the live path, and only
+   then changes authority.
+
+The current owner can cancel a pending nomination by re-entering the current
+passphrase. If the service restarts while pending, the status survives but the
+decrypted key does not; the current owner must reopen/resume before the
+successor can accept. The former owner's old passphrase no longer opens the
+accepted current copy.
+
+This release changes the engine/backend boundary. Deploy its engine and backend
+artifacts together with `fpa-stage deploy-engine-backend <engine-artifact>
+<backend-artifact>`, then deploy the launcher separately. The command stops the
+backend, installs and compatibility-checks the pair, starts it, and commits the
+accepted records only after health succeeds.
 
 Historical copies still require care:
 
-- Anyone who has ever known a book's passphrase can decrypt any copy of it
-  they later obtain, by any means — a `backup_book` output, a raw folder
-  copy, an old off-machine git push — indefinitely. Handing over a book via
-  `backup_book`/`restore_book` does **not** revoke the previous owner's
-  access.
+- Anyone who knows an historical passphrase can decrypt an historical copy
+  carrying that passphrase's keystore — a `backup_book` output, a raw folder
+  copy, or an old off-machine git push. The accepted live copy uses a fresh
+  book key, but already-distributed historical copies cannot be revoked.
 - A `restore_book`-based handoff is still better than a raw `cp -r` of the
   book folder: restore only ever moves the three portable files, so the
   receiving side starts with no git history of its own (no commit

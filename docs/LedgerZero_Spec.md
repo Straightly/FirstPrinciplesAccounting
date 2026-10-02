@@ -192,7 +192,7 @@ For the first implementation:
 - one `AccountingBook` has one owner role at bootstrap
 - the owner role is initially held by one user
 - the current owner may transfer the owner role to another user, but loses that owner authority after the transfer
-- ownership transfer rewraps the live book key for the new owner; historical encrypted copies keep their historical keystore boundary
+- ownership transfer is a two-party, frozen handoff: the current owner confirms the current passphrase, the nominated successor chooses a new passphrase, and acceptance replaces the live artifacts with a validated copy encrypted under a fresh book key; historical encrypted copies keep their historical passphrase boundary
 - entities, roles, workflows, accounts, and entries all belong to exactly one `AccountingBook`
 - `AccountingBook` is the storage, export, restore, and book-owner security boundary
 - `Entity` remains the accounting and reporting boundary inside the book

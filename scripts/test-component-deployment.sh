@@ -92,8 +92,15 @@ fi
 rm -rf "$bad_backend_root"
 [[ "$(cat "$STAGE_ROOT/data/books/l3-proof/sentinel")" == preserved ]] || { echo "failed-health recovery changed durable data" >&2; exit 1; }
 
+before_launcher="$(fingerprint launcher)"
+before_runtime_frontends="$(fingerprint runtime-frontends)"
+./scripts/local-staging.sh deploy-engine-backend "$(artifact engine)" "$(artifact backend)" >/dev/null
+[[ "$before_launcher" == "$(fingerprint launcher)" ]] || { echo "coordinated engine/backend deployment altered launcher" >&2; exit 1; }
+[[ "$before_runtime_frontends" == "$(fingerprint runtime-frontends)" ]] || { echo "coordinated engine/backend deployment altered runtime frontends" >&2; exit 1; }
+[[ "$(cat "$STAGE_ROOT/data/books/l3-proof/sentinel")" == preserved ]] || { echo "coordinated engine/backend deployment changed durable data" >&2; exit 1; }
+
 ./scripts/local-staging.sh recover >/dev/null
 [[ "$(cat "$STAGE_ROOT/data/books/l3-proof/sentinel")" == preserved ]] || { echo "recovery changed durable data" >&2; exit 1; }
 ./scripts/local-staging.sh status >/dev/null
 
-echo "L3 component deployment acceptance passed: four changed-version replacements, incompatibility rejection, failed-health recovery, and delete/redeploy recovery."
+echo "L3 component deployment acceptance passed: four changed-version replacements, coordinated engine/backend API-boundary replacement, incompatibility rejection, failed-health recovery, and delete/redeploy recovery."

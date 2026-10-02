@@ -186,7 +186,7 @@ Just create a new book and add everything to it, including the deployed workflow
 - [X] 8. Decide encryption envelope and book identity
   - Gap: The spec defines per-user keys and encrypted exports, but not the book data key, key wrapping, owner transfer, revocation, or restored-book identity.
   - Recommendation: Define a book-level data key wrapped for authorized users, plus stable `book_id` and restore/instance identity rules.
-  - Decision:  The book has one key.  It will be loaded into memory before the book is read into the memory.  In the memory, access to account data is limited by authorization, not cryption.  Exporting only export data readable by the user who create the export, and will be encrypted by the user who is going to read the export.  When owner ship is transferred, the live book key will be rewrapped by the new owner's passphrase.  There should be no key transfer of any kind.
+  - Decision: The book has one live data key held only in backend memory while open. In-memory access is controlled by authorization, not additional encryption. Ownership transfer is a two-party frozen handoff: the current owner confirms the current passphrase, the nominated successor chooses a new passphrase, and acceptance creates a validated replacement under a fresh random book key wrapped by the successor's passphrase. No key or passphrase is transferred between users.
 
 ## Implement the first LedgerZero system.
 

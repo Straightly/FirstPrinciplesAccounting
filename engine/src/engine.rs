@@ -1066,9 +1066,10 @@ impl AccountingEngine {
 
     // -- workflows and roles ---------------------------------------------------
 
-    /// Records the bootstrapped Change owner workflow in the immutable book
-    /// log. Authorization and key rewrapping live at the backend/storage
-    /// boundary; the engine remains the audit authority.
+    /// Records final acceptance of the bootstrapped Change owner workflow in
+    /// the immutable book log. Two-party authorization and fresh artifact
+    /// encryption live at the backend/storage boundary; the engine remains
+    /// the final ownership-change audit authority.
     pub fn change_owner(
         &mut self,
         op_id: Uuid,

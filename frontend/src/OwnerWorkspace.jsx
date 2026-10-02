@@ -34,7 +34,7 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
   const [role, setRole] = useState({ name: "", description: "" });
   const [roleWorkflow, setRoleWorkflow] = useState({ role_id: "", workflow_id: "" });
   const [roleUser, setRoleUser] = useState({ role_id: "", user_email: "" });
-  const [owner, setOwner] = useState({ email: "", passphrase: "", confirm: "" });
+  const [owner, setOwner] = useState({ email: "", currentPassphrase: "", newPassphrase: "", confirm: "", cancelPassphrase: "" });
 
   const request = useCallback(async (path, options, success) => {
     setError("");
@@ -45,7 +45,7 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
   }, [setError, setMessage]);
 
   const loadData = useCallback(async () => {
-    if (!book || !isBookOwner || !book.is_open) { setData(emptyData); return; }
+    if (!book || !isBookOwner || !book.is_open || book.pending_owner_transfer) { setData(emptyData); return; }
     setLoading(true);
     const base = `/api/books/${book.book_id}`;
     const entity = encodeURIComponent(book.entity_id);
@@ -113,8 +113,21 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
       </div>}
     </Panel>}
 
-    {book && !isBookOwner && <Panel title="Book access"><p>You can launch assigned workflows, but only the current book owner can administer this book.</p></Panel>}
-    {book && isBookOwner && <>
+    {book?.pending_owner_transfer && <Panel title="Ownership transfer pending" className="danger-zone">
+      <p className="warning">This book is frozen. No accounting, workflow, backup, close, or administrative operation is allowed until the transfer is accepted or cancelled.</p>
+      <p>Current owner: <strong>{book.owner_email}</strong><br />Nominated successor: <strong>{book.pending_owner_transfer.new_owner_email}</strong></p>
+      {isBookOwner && <>
+        {!book.is_open && <><p>The service restarted or the book is no longer decrypted. Reopen it with the current passphrase before the successor can accept.</p><form onSubmit={openBook}><Field label="Current book passphrase"><input type="password" required autoComplete="new-password" value={openPassphrase} onChange={(event) => setOpenPassphrase(event.target.value)} /></Field><Button type="submit">Resume pending transfer</Button></form></>}
+        {book.is_open && <form onSubmit={async (event) => { event.preventDefault(); if (!window.confirm(`Cancel the transfer of ${book.name} to ${book.pending_owner_transfer.new_owner_email}?`)) return; const value = await request(`/api/books/${book.book_id}/ownership-transfer/cancel`, { method: "POST", body: JSON.stringify({ current_passphrase: owner.cancelPassphrase }) }, "Ownership transfer cancelled; the book is operational again."); if (value) { setOwner({ email: "", currentPassphrase: "", newPassphrase: "", confirm: "", cancelPassphrase: "" }); await onChanged("change"); } }}><Field label="Current book passphrase"><input type="password" required autoComplete="new-password" value={owner.cancelPassphrase} onChange={(event) => setOwner({ ...owner, cancelPassphrase: event.target.value })} /></Field><Button kind="danger" type="submit">Cancel pending transfer</Button></form>}
+      </>}
+      {me.user.email.toLowerCase() === book.pending_owner_transfer.new_owner_email.toLowerCase() && <>
+        {!book.is_open && <p className="warning">Acceptance is waiting for the current owner to resume the decrypted book after the service restart.</p>}
+        {book.is_open && <form onSubmit={async (event) => { event.preventDefault(); if (owner.newPassphrase !== owner.confirm) { setError("New passphrase confirmation does not match."); return; } if (!window.confirm(`Accept ownership of ${book.name}? A fresh encrypted book copy will replace the current live copy.`)) return; const value = await request(`/api/books/${book.book_id}/ownership-transfer/accept`, { method: "POST", body: JSON.stringify({ op_id: newId(), new_passphrase: owner.newPassphrase }) }, `Ownership of ${book.name} accepted.`); if (value) { setOwner({ email: "", currentPassphrase: "", newPassphrase: "", confirm: "", cancelPassphrase: "" }); await onChanged("change"); } }}><Field label="Choose new book passphrase"><input type="password" minLength="8" required autoComplete="new-password" value={owner.newPassphrase} onChange={(event) => setOwner({ ...owner, newPassphrase: event.target.value })} /></Field><Field label="Confirm new passphrase"><input type="password" minLength="8" required autoComplete="new-password" value={owner.confirm} onChange={(event) => setOwner({ ...owner, confirm: event.target.value })} /></Field><p className="muted">Your passphrase derives a key that wraps a fresh random book-encryption key. Neither passphrase nor plaintext key is stored.</p><Button kind="danger" type="submit">Accept ownership</Button></form>}
+      </>}
+      {!isBookOwner && me.user.email.toLowerCase() !== book.pending_owner_transfer.new_owner_email.toLowerCase() && <p>You cannot operate this book while its ownership transfer is pending.</p>}
+    </Panel>}
+    {book && !book.pending_owner_transfer && !isBookOwner && <Panel title="Book access"><p>You can launch assigned workflows, but only the current book owner can administer this book.</p></Panel>}
+    {book && !book.pending_owner_transfer && isBookOwner && <>
       <nav className="tabs" aria-label="Book administration">
         {[['books', 'Book'], ['setup', 'Setup'], ['ledger', 'Ledger'], ['workflows', 'Workflows & roles'], ['audit', 'Audit'], ['ownership', 'Ownership']].map(([id, label]) => <button key={id} className={`tab ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>{label}</button>)}
       </nav>
@@ -122,7 +135,7 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
 
       {tab === "books" && <Panel title={`${book.name} · ${book.is_open ? "Open" : "Closed"}`}>
         <p className="muted">Book ID <code>{book.book_id}</code><br />Entity ID <code>{book.entity_id}</code></p>
-        {!book.is_open && <form onSubmit={openBook}><Field label="Book passphrase"><input type="password" required value={openPassphrase} onChange={(event) => setOpenPassphrase(event.target.value)} /></Field><Button type="submit">Open book</Button></form>}
+        {!book.is_open && <form onSubmit={openBook}><Field label="Book passphrase"><input type="password" required autoComplete="new-password" value={openPassphrase} onChange={(event) => setOpenPassphrase(event.target.value)} /></Field><Button type="submit">Open book</Button></form>}
         {book.is_open && <div className="actions"><Button kind="secondary" onClick={closeBook}>Close book</Button></div>}
         <hr />
         <form onSubmit={async (event) => { event.preventDefault(); await request(`/api/books/${book.book_id}/backup`, { method: "POST", body: JSON.stringify({ location: backupLocation }) }, (value) => `Encrypted backup written to ${value.location}.`); }}>
@@ -175,7 +188,7 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
 
       {tab === "audit" && <Panel title="Immutable audit sequence">{!book.is_open ? <p className="warning">Open the book to inspect its audit log.</p> : <div className="table-wrap"><table><thead><tr><th>#</th><th>Type</th><th>Time</th><th>Actor</th><th>Outcome</th></tr></thead><tbody>{data.audit.map((item, index) => <tr key={item.event_id}><td>{index + 1}</td><td>{item.event_type}</td><td>{new Date(item.occurred_at).toLocaleString()}</td><td><code>{item.actor_user_id}</code></td><td><JsonDetails label="Event" value={item} /></td></tr>)}</tbody></table></div>}</Panel>}
 
-      {tab === "ownership" && <Panel title="Change owner" className="danger-zone"><p className="warning">Ownership changes immediately. Your owner access ends and the successor uses the new passphrase. Historical backups keep their historical passphrases.</p><form onSubmit={async (event) => { event.preventDefault(); if (owner.passphrase !== owner.confirm) { setError("Passphrase confirmation does not match."); return; } if (!window.confirm(`Transfer ${book.name} to ${owner.email}? This cannot be undone from your current account.`)) return; const value = await request(`/api/books/${book.book_id}/workflows/change-owner`, { method: "POST", body: JSON.stringify({ op_id: newId(), new_owner_email: owner.email, new_passphrase: owner.passphrase }) }, `Ownership transferred to ${owner.email}.`); if (value) { setOwner({ email: "", passphrase: "", confirm: "" }); await onChanged("change"); } }}><Field label="Successor email"><input type="email" required value={owner.email} onChange={(event) => setOwner({ ...owner, email: event.target.value })} /></Field><Field label="New passphrase"><input type="password" minLength="8" required value={owner.passphrase} onChange={(event) => setOwner({ ...owner, passphrase: event.target.value })} /></Field><Field label="Confirm passphrase"><input type="password" minLength="8" required value={owner.confirm} onChange={(event) => setOwner({ ...owner, confirm: event.target.value })} /></Field><Button kind="danger" type="submit">Transfer ownership</Button></form></Panel>}
+      {tab === "ownership" && <Panel title="Transfer ownership" className="danger-zone"><p className="warning">Step 1 nominates the successor and freezes the open book. The successor must sign in separately and choose their own new passphrase in step 2.</p><form onSubmit={async (event) => { event.preventDefault(); if (!window.confirm(`Freeze ${book.name} and nominate ${owner.email} as its successor?`)) return; const value = await request(`/api/books/${book.book_id}/ownership-transfer/initiate`, { method: "POST", body: JSON.stringify({ transfer_id: newId(), new_owner_email: owner.email, current_passphrase: owner.currentPassphrase }) }, `Transfer initiated for ${owner.email}. The book is now frozen.`); if (value) { setOwner({ email: "", currentPassphrase: "", newPassphrase: "", confirm: "", cancelPassphrase: "" }); await onChanged("change"); } }}><Field label="Successor email"><input type="email" required autoComplete="off" value={owner.email} onChange={(event) => setOwner({ ...owner, email: event.target.value })} /></Field><Field label="Current book passphrase"><input type="password" minLength="8" required autoComplete="new-password" value={owner.currentPassphrase} onChange={(event) => setOwner({ ...owner, currentPassphrase: event.target.value })} /></Field><p className="muted">The current passphrase is checked once and never retained or prefilled.</p><Button kind="danger" type="submit">Confirm and freeze book</Button></form></Panel>}
     </>}
   </>;
 }

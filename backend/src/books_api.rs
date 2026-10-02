@@ -51,6 +51,13 @@ async fn book_context(
     book_id: Uuid,
 ) -> Result<(User, Arc<OpenBook>), ApiError> {
     let open_book = state.books.get_open(book_id).await?;
+    if open_book.meta.read().await.pending_owner_transfer.is_some() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "BOOK_TRANSFER_PENDING",
+            "book is frozen while its ownership transfer is pending",
+        ));
+    }
     let user = authenticated_book_owner(state, headers, &open_book).await?;
     Ok((user, open_book))
 }
@@ -67,6 +74,13 @@ async fn open_book_for_any_user(
 ) -> Result<(User, Arc<OpenBook>), ApiError> {
     let user = crate::auth::current_user(state, headers)?;
     let open_book = state.books.get_open(book_id).await?;
+    if open_book.meta.read().await.pending_owner_transfer.is_some() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "BOOK_TRANSFER_PENDING",
+            "book is frozen while its ownership transfer is pending",
+        ));
+    }
     Ok((user, open_book))
 }
 
@@ -124,20 +138,30 @@ pub struct BookSummary {
 }
 
 #[derive(Deserialize)]
-pub struct ChangeOwnerRequest {
-    pub op_id: Uuid,
+pub struct InitiateOwnerTransferRequest {
+    pub transfer_id: Uuid,
     pub new_owner_email: String,
+    pub current_passphrase: String,
+}
+
+#[derive(Deserialize)]
+pub struct ConfirmCurrentPassphraseRequest {
+    pub current_passphrase: String,
+}
+
+#[derive(Deserialize)]
+pub struct AcceptOwnerTransferRequest {
+    pub op_id: Uuid,
     pub new_passphrase: String,
 }
 
-/// POST /api/books/:book_id/workflows/change-owner — bootstrapped workflow.
-/// Only the book's current owner may execute it. It appends an immutable
-/// audit event and rewraps the book key for the successor's passphrase.
-pub async fn change_owner(
+/// Step 1: the current owner proves knowledge of the current book
+/// passphrase and nominates a successor. The book remains open but frozen.
+pub async fn initiate_owner_transfer(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(book_id): Path<Uuid>,
-    Json(body): Json<ChangeOwnerRequest>,
+    Json(body): Json<InitiateOwnerTransferRequest>,
 ) -> Result<Json<BookMeta>, ApiError> {
     let open_book = state.books.get_open(book_id).await?;
     let user = authenticated_book_owner(&state, &headers, &open_book).await?;
@@ -150,22 +174,112 @@ pub async fn change_owner(
             "new owner must be a different user",
         ));
     }
+    if body.current_passphrase.len() < 8 {
+        return Err(ApiError::invalid_input("current passphrase is required"));
+    }
+    let meta = state
+        .books
+        .initiate_owner_transfer(
+            &open_book,
+            body.transfer_id,
+            &email,
+            &body.current_passphrase,
+        )
+        .await?;
+    state.audit.record(
+        "ownership_transfer",
+        &user.email,
+        "initiated",
+        &format!("book {book_id} transfer initiated for {email}"),
+    );
+    Ok(Json(meta))
+}
+
+/// The current owner can recover from a mistaken or unclaimed nomination,
+/// again proving the current book passphrase.
+pub async fn cancel_owner_transfer(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<ConfirmCurrentPassphraseRequest>,
+) -> Result<Json<BookMeta>, ApiError> {
+    let open_book = state.books.get_open(book_id).await?;
+    let user = authenticated_book_owner(&state, &headers, &open_book).await?;
+    let meta = state
+        .books
+        .cancel_owner_transfer(&open_book, &body.current_passphrase)
+        .await?;
+    state.audit.record(
+        "ownership_transfer",
+        &user.email,
+        "cancelled",
+        &format!("book {book_id} transfer cancelled"),
+    );
+    Ok(Json(meta))
+}
+
+/// Step 2: only the nominated authenticated identity may supply the new
+/// passphrase and accept. A fresh encrypted book artifact set replaces the
+/// old live set only after it validates successfully.
+pub async fn accept_owner_transfer(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<AcceptOwnerTransferRequest>,
+) -> Result<Json<BookMeta>, ApiError> {
+    let user = crate::auth::current_user(&state, &headers)?;
+    let open_book = state.books.get_open(book_id).await?;
+    let meta = open_book.meta.read().await.clone();
+    let Some(pending) = meta.pending_owner_transfer.as_ref() else {
+        let engine = open_book.engine.read().await;
+        let already_accepted = engine.audit_log().iter().any(|event| {
+            event.event_id == body.op_id
+                && matches!(
+                    &event.payload,
+                    EventPayload::BookOwnerChanged { new_owner_email, .. }
+                        if new_owner_email.eq_ignore_ascii_case(&user.email)
+                )
+        });
+        if already_accepted && meta.owner_email.eq_ignore_ascii_case(&user.email) {
+            return Ok(Json(meta));
+        }
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "NO_PENDING_TRANSFER",
+            "book has no pending ownership transfer",
+        ));
+    };
+    if !user
+        .email
+        .trim()
+        .eq_ignore_ascii_case(pending.new_owner_email.trim())
+    {
+        state.audit.record(
+            "ownership_transfer",
+            &user.email,
+            "denied",
+            "only the nominated successor may accept ownership",
+        );
+        return Err(ApiError::unauthorized_api(
+            "only the nominated successor may accept ownership",
+        ));
+    }
     if body.new_passphrase.len() < 8 {
         return Err(ApiError::invalid_input(
             "new passphrase must be at least 8 characters",
         ));
     }
-    let meta = state
+    let updated = state
         .books
-        .change_owner(
-            &open_book,
-            body.op_id,
-            user.user_id,
-            &email,
-            &body.new_passphrase,
-        )
+        .accept_owner_transfer(open_book, body.op_id, user.user_id, &body.new_passphrase)
         .await?;
-    Ok(Json(meta))
+    state.audit.record(
+        "ownership_transfer",
+        &user.email,
+        "accepted",
+        &format!("book {book_id} ownership accepted"),
+    );
+    Ok(Json(updated))
 }
 
 /// POST /api/books — bootstrap-owner-gated (Impl Spec §5.3). Creating a book
@@ -254,10 +368,18 @@ pub async fn close_book(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
     let authorized = match state.books.get_meta(book_id).await {
-        Ok(current) => user
-            .email
-            .trim()
-            .eq_ignore_ascii_case(current.owner_email.trim()),
+        Ok(current) => {
+            if current.pending_owner_transfer.is_some() {
+                return Err(ApiError::new(
+                    axum::http::StatusCode::CONFLICT,
+                    "BOOK_TRANSFER_PENDING",
+                    "book must remain open while its ownership transfer is pending",
+                ));
+            }
+            user.email
+                .trim()
+                .eq_ignore_ascii_case(current.owner_email.trim())
+        }
         // Preserve close's operationally useful idempotency for a never-known
         // id, but only for the installation bootstrap operator.
         Err(err) if err.error_code == "UNKNOWN_BOOK" => state.authz.is_bootstrap_owner(&user),
@@ -297,6 +419,13 @@ pub async fn backup_book(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
     let current = state.books.get_meta(book_id).await?;
+    if current.pending_owner_transfer.is_some() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "BOOK_TRANSFER_PENDING",
+            "book cannot be backed up while its ownership transfer is pending",
+        ));
+    }
     if !user
         .email
         .trim()
@@ -400,6 +529,11 @@ pub async fn list_my_books(
             .email
             .trim()
             .eq_ignore_ascii_case(meta.owner_email.trim())
+            || meta.pending_owner_transfer.as_ref().is_some_and(|pending| {
+                user.email
+                    .trim()
+                    .eq_ignore_ascii_case(pending.new_owner_email.trim())
+            })
         {
             visible.push(meta);
         }

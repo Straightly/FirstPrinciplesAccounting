@@ -1,5 +1,5 @@
-//! Change-owner workflow: current-owner authorization, immutable audit event,
-//! immediate authority transfer, and passphrase-key rewrapping.
+//! Two-party change-owner workflow: current-passphrase confirmation, frozen
+//! pending state, successor acceptance, fresh encryption, and recovery.
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
@@ -87,7 +87,7 @@ async fn call(
 }
 
 #[tokio::test]
-async fn change_owner_transfers_authority_and_rewraps_the_book_key() {
+async fn two_party_owner_transfer_freezes_then_reencrypts_for_the_successor() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_over(dir.path());
     let old_cookie = login(&app, OWNER).await;
@@ -105,20 +105,123 @@ async fn change_owner_transfers_authority_and_rewraps_the_book_key() {
     let created = json_body(created).await;
     let book_id = created["book_id"].as_str().unwrap();
 
-    let transfer = call(
+    let wrong_confirmation = call(
         &app,
         Method::POST,
-        &format!("/api/books/{book_id}/workflows/change-owner"),
+        &format!("/api/books/{book_id}/ownership-transfer/initiate"),
+        Some(&old_cookie),
+        Some(json!({
+            "transfer_id": Uuid::new_v4(),
+            "new_owner_email": SUCCESSOR,
+            "current_passphrase": "not the current passphrase"
+        })),
+    )
+    .await;
+    assert_eq!(wrong_confirmation.status(), StatusCode::UNAUTHORIZED);
+
+    let transfer_id = Uuid::new_v4();
+    let initiated = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/initiate"),
+        Some(&old_cookie),
+        Some(json!({
+            "transfer_id": transfer_id,
+            "new_owner_email": SUCCESSOR,
+            "current_passphrase": OLD_PASSPHRASE
+        })),
+    )
+    .await;
+    assert_eq!(initiated.status(), StatusCode::OK);
+    let initiated = json_body(initiated).await;
+    assert_eq!(initiated["owner_email"], OWNER);
+    assert_eq!(
+        initiated["pending_owner_transfer"]["new_owner_email"],
+        SUCCESSOR
+    );
+
+    let successor_books = call(
+        &app,
+        Method::GET,
+        "/api/books/mine",
+        Some(&new_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(successor_books.status(), StatusCode::OK);
+    let successor_books = json_body(successor_books).await;
+    assert_eq!(successor_books[0]["book_id"], book_id);
+    assert_eq!(
+        successor_books[0]["pending_owner_transfer"]["transfer_id"],
+        transfer_id.to_string()
+    );
+
+    let frozen = call(
+        &app,
+        Method::GET,
+        &format!("/api/books/{book_id}/entities"),
+        Some(&old_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(frozen.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(frozen).await["error_code"],
+        "BOOK_TRANSFER_PENDING"
+    );
+
+    let cannot_close = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/close"),
+        Some(&old_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(cannot_close.status(), StatusCode::CONFLICT);
+
+    let wrong_identity = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/accept"),
         Some(&old_cookie),
         Some(json!({
             "op_id": Uuid::new_v4(),
-            "new_owner_email": SUCCESSOR,
             "new_passphrase": NEW_PASSPHRASE
         })),
     )
     .await;
-    assert_eq!(transfer.status(), StatusCode::OK);
-    assert_eq!(json_body(transfer).await["owner_email"], SUCCESSOR);
+    assert_eq!(wrong_identity.status(), StatusCode::FORBIDDEN);
+
+    let acceptance_id = Uuid::new_v4();
+    let accepted = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/accept"),
+        Some(&new_cookie),
+        Some(json!({
+            "op_id": acceptance_id,
+            "new_passphrase": NEW_PASSPHRASE
+        })),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let accepted = json_body(accepted).await;
+    assert_eq!(accepted["owner_email"], SUCCESSOR);
+    assert!(accepted.get("pending_owner_transfer").is_none());
+
+    let accepted_retry = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/accept"),
+        Some(&new_cookie),
+        Some(json!({
+            "op_id": acceptance_id,
+            "new_passphrase": NEW_PASSPHRASE
+        })),
+    )
+    .await;
+    assert_eq!(accepted_retry.status(), StatusCode::OK);
 
     let old_denied = call(
         &app,
@@ -198,4 +301,150 @@ async fn change_owner_transfers_authority_and_rewraps_the_book_key() {
         "",
         "a successful owner transfer must checkpoint updated book.json"
     );
+}
+
+#[tokio::test]
+async fn pending_transfer_survives_restart_and_requires_the_old_owner_to_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let book_id = {
+        let app = app_over(dir.path());
+        let owner_cookie = login(&app, OWNER).await;
+        let created = call(
+            &app,
+            Method::POST,
+            "/api/books",
+            Some(&owner_cookie),
+            Some(json!({ "name": "Restart transfer", "passphrase": OLD_PASSPHRASE })),
+        )
+        .await;
+        let book_id = json_body(created).await["book_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let initiated = call(
+            &app,
+            Method::POST,
+            &format!("/api/books/{book_id}/ownership-transfer/initiate"),
+            Some(&owner_cookie),
+            Some(json!({
+                "transfer_id": Uuid::new_v4(),
+                "new_owner_email": SUCCESSOR,
+                "current_passphrase": OLD_PASSPHRASE
+            })),
+        )
+        .await;
+        assert_eq!(initiated.status(), StatusCode::OK);
+        book_id
+    };
+
+    let app = app_over(dir.path());
+    let owner_cookie = login(&app, OWNER).await;
+    let successor_cookie = login(&app, SUCCESSOR).await;
+    let listed = call(
+        &app,
+        Method::GET,
+        "/api/books/mine",
+        Some(&successor_cookie),
+        None,
+    )
+    .await;
+    let listed = json_body(listed).await;
+    assert_eq!(listed[0]["book_id"], book_id);
+    assert_eq!(listed[0]["is_open"], false);
+
+    let premature = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/accept"),
+        Some(&successor_cookie),
+        Some(json!({ "op_id": Uuid::new_v4(), "new_passphrase": NEW_PASSPHRASE })),
+    )
+    .await;
+    assert_eq!(premature.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(premature).await["error_code"], "BOOK_NOT_OPEN");
+
+    let resumed = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/open"),
+        Some(&owner_cookie),
+        Some(json!({ "passphrase": OLD_PASSPHRASE })),
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let accepted = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/accept"),
+        Some(&successor_cookie),
+        Some(json!({ "op_id": Uuid::new_v4(), "new_passphrase": NEW_PASSPHRASE })),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn current_owner_can_cancel_a_mistaken_nomination_with_the_current_passphrase() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_over(dir.path());
+    let owner_cookie = login(&app, OWNER).await;
+    let created = call(
+        &app,
+        Method::POST,
+        "/api/books",
+        Some(&owner_cookie),
+        Some(json!({ "name": "Cancel transfer", "passphrase": OLD_PASSPHRASE })),
+    )
+    .await;
+    let book_id = json_body(created).await["book_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let initiated = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/initiate"),
+        Some(&owner_cookie),
+        Some(json!({
+            "transfer_id": Uuid::new_v4(),
+            "new_owner_email": "mistyped@example.com",
+            "current_passphrase": OLD_PASSPHRASE
+        })),
+    )
+    .await;
+    assert_eq!(initiated.status(), StatusCode::OK);
+
+    let wrong = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/cancel"),
+        Some(&owner_cookie),
+        Some(json!({ "current_passphrase": "wrong passphrase value" })),
+    )
+    .await;
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+    let cancelled = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{book_id}/ownership-transfer/cancel"),
+        Some(&owner_cookie),
+        Some(json!({ "current_passphrase": OLD_PASSPHRASE })),
+    )
+    .await;
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    assert!(json_body(cancelled)
+        .await
+        .get("pending_owner_transfer")
+        .is_none());
+
+    let operational = call(
+        &app,
+        Method::GET,
+        &format!("/api/books/{book_id}/entities"),
+        Some(&owner_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(operational.status(), StatusCode::OK);
 }

@@ -23,6 +23,8 @@ Usage: fpa-stage <command> [arguments]
 
   build-deploy                         Build/deploy all four components.
   deploy-component <name> <artifact>  Replace only one component.
+  deploy-engine-backend <engine> <backend>
+                                       Replace a coordinated API-boundary pair.
   redeploy-component <name>           Reinstall its recorded artifact.
   recover                              Delete/redeploy all components from records.
   start | stop | restart               Operate the staging backend.
@@ -263,7 +265,7 @@ payload_hash() {
 }
 
 install_component() {
-  local expected="$1" artifact="$2" extract top manifest actual expected_hash actual_hash target saved name artifact_hash deployed_at description key
+  local expected="$1" artifact="$2" defer_compatibility="${3:-false}" extract top manifest actual expected_hash actual_hash target saved name artifact_hash deployed_at description key
   validate_archive "$artifact"
   extract="$(mktemp -d "$STAGE_ROOT/.extract.XXXXXX")"
   tar -xzf "$artifact" -C "$extract"
@@ -293,7 +295,7 @@ install_component() {
   expected_hash="$(manifest_value "$manifest" payload_sha256)"
   actual_hash="$(payload_hash "$expected" "$top")"
   [[ "$actual_hash" == "$expected_hash" ]] || die "$expected payload hash mismatch"
-  check_compatibility "$expected" "$manifest"
+  [[ "$defer_compatibility" == true ]] || check_compatibility "$expected" "$manifest"
 
   mkdir -p "$ARTIFACTS_DIR/$expected"
   artifact_hash="$(shasum -a 256 "$artifact" | awk '{print $1}')"
@@ -339,6 +341,21 @@ deploy_component() {
   elif all_components_installed; then start_app
   fi
   commit_component "$component"
+}
+
+deploy_engine_backend() {
+  local engine_artifact="$1" backend_artifact="$2" was_running=false
+  ensure_layout
+  pid_is_running && was_running=true
+  stop_app
+  install_component engine "$engine_artifact" true
+  install_component backend "$backend_artifact" true
+  check_compatibility
+  if [[ "$SCRIPT_PATH" != "$DEPLOY_DIR/fpa-stage" ]]; then cp "$SCRIPT_PATH" "$DEPLOY_DIR/fpa-stage"; chmod +x "$DEPLOY_DIR/fpa-stage"; fi
+  create_or_migrate_config
+  if [[ "$was_running" == true ]] || all_components_installed; then start_app; fi
+  commit_component engine
+  commit_component backend
 }
 
 recorded_artifact() {
@@ -411,6 +428,7 @@ command="${1:-}"
 case "$command" in
   build-deploy) [[ $# -eq 1 ]] || die "build-deploy accepts no arguments"; build_deploy ;;
   deploy-component) [[ $# -eq 3 ]] || die "usage: $0 deploy-component <name> <artifact>"; deploy_component "$2" "$3" ;;
+  deploy-engine-backend) [[ $# -eq 3 ]] || die "usage: $0 deploy-engine-backend <engine-artifact> <backend-artifact>"; deploy_engine_backend "$2" "$3" ;;
   redeploy-component) [[ $# -eq 2 ]] || die "usage: $0 redeploy-component <name>"; ensure_layout; deploy_component "$2" "$(recorded_artifact "$2")" ;;
   recover) [[ $# -eq 1 ]] || die "recover accepts no arguments"; recover ;;
   start) [[ $# -eq 1 ]] || die "start accepts no arguments"; start_app ;;

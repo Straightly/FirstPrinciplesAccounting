@@ -494,16 +494,22 @@ impl FileBookStore {
         git_commit(&self.dir, message).await
     }
 
-    /// Rewraps the already-open in-memory book key for a successor owner.
-    /// Book data is not decrypted/re-encrypted and the raw key never leaves
-    /// this storage boundary.
-    pub async fn rewrap_key(&self, key_provider: &dyn BookKeyProvider) -> Result<(), StorageError> {
-        let keystore = key_provider.wrap(&self.book_key)?;
-        let bytes = serde_json::to_vec_pretty(&keystore)
-            .map_err(|e| StorageError::Corrupt(e.to_string()))?;
-        atomic_write(&self.dir.join(KEYSTORE_FILE), &bytes).await?;
-        git_init(&self.dir).await?;
-        git_commit(&self.dir, "book owner changed; key rewrapped").await?;
+    /// Confirms that a provider can unwrap the durable keystore to the same
+    /// key held by this open store. Used for sensitive operations that must
+    /// require the current passphrase even though the book is already open.
+    pub async fn verify_key_provider(
+        &self,
+        key_provider: &dyn BookKeyProvider,
+    ) -> Result<(), StorageError> {
+        let keystore_bytes = tokio::fs::read(self.dir.join(KEYSTORE_FILE)).await?;
+        let keystore: KeystoreFile = serde_json::from_slice(&keystore_bytes)
+            .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        let candidate = key_provider.unwrap(&keystore)?;
+        if candidate != self.book_key {
+            return Err(StorageError::Crypto(
+                "wrong passphrase or corrupt keystore".into(),
+            ));
+        }
         Ok(())
     }
 

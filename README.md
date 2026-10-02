@@ -76,6 +76,10 @@ all four component directories and reinstalls their recorded artifacts while
 leaving `config/`, `data/`, `logs/`, `artifacts/`, and `deploy/` intact.
 Workflow SPAs created through the running application live under persistent
 `data/generated-workflows`, not in the replaceable packaged-workflow component.
+When an engine API boundary changes, use
+`fpa-stage deploy-engine-backend <engine-artifact> <backend-artifact>` so the
+compatible pair is preflighted and health-gated together; ordinary fixes still
+replace only their affected component.
 
 Run the isolated L3 deployment acceptance drill with:
 

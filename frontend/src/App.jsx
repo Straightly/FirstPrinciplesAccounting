@@ -73,7 +73,7 @@ export default function App() {
 
   const loadWorkflows = useCallback(async () => {
     if (!selectedBook) { setWorkflows(null); return; }
-    if (!selectedBook.is_open) { setWorkflows([]); return; }
+    if (!selectedBook.is_open || selectedBook.pending_owner_transfer) { setWorkflows([]); return; }
     setLoadingWorkflows(true);
     const result = await api(`/api/books/${selectedBook.book_id}/workflows/mine?entity_id=${selectedBook.entity_id}`);
     setLoadingWorkflows(false);
@@ -129,7 +129,7 @@ export default function App() {
         {books === null && <p className="muted">Loading books…</p>}
         {books && books.length === 0 && <p className="muted">No books are available yet.</p>}
         <div className="book-list">{(books || []).map((book) => <button className={`book ${book.book_id === selectedBookId ? "active" : ""}`} key={book.book_id} onClick={() => setSelectedBookId(book.book_id)}>
-          <strong>{book.name}</strong><span className={`status ${book.is_open ? "good" : ""}`}>{book.is_open ? "open" : "closed"}</span><div className="muted">{book.owner_email}</div>
+          <strong>{book.name}</strong><span className={`status ${book.is_open && !book.pending_owner_transfer ? "good" : ""}`}>{book.pending_owner_transfer ? "transferring" : book.is_open ? "open" : "closed"}</span><div className="muted">{book.owner_email}</div>
         </button>)}</div>
         <p className="muted">User ID<br /><code>{me.user.user_id}</code></p>
         <p className="muted">Bootstrap owner: {me.is_bootstrap_owner ? "yes" : "no"}</p>
