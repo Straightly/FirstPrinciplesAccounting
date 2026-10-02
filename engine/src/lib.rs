@@ -27,6 +27,11 @@ pub use error::{EngineError, ErrorCode};
 
 /// Engine crate version, re-exported for diagnostics endpoints.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Deployment compatibility contract. Increment only for an incompatible
+/// backend/engine boundary change.
+pub const ENGINE_API_VERSION: u32 = 1;
+/// Encrypted event-log format understood by this engine.
+pub const STORAGE_FORMAT_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests {

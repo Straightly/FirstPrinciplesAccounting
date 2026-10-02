@@ -2,6 +2,7 @@
 
 A first-principles, AI-native accounting platform. Authoritative documents:
 
+- [`docs/FPA-Architecture-Diagram.md`](docs/FPA-Architecture-Diagram.md) — current runtime and deployment architecture
 - `docs/LedgerZero_Impl_Spec_v1.md` — implementation spec (build from this)
 - `docs/LedgerZero_Impl_Plan_v1.md` — milestone plan
 - `docs/LedgerZero_Theorems.md` — standing architectural guarantees every change must preserve
@@ -52,10 +53,15 @@ Deploy a packaged copy outside the source checkout:
 ./scripts/local-staging.sh build-deploy
 ```
 
-This uses the committed dependency lockfiles, installs under
-`~/Deployments/FPA-Staging`, preserves configuration/data outside the
-replaceable application directory, starts the backend on `127.0.0.1:8081`,
-and checks its health. The first run creates
+This uses the committed dependency lockfiles, installs separate engine,
+backend, launcher, and runtime-frontend artifacts under
+`~/Deployments/FPA-Staging/components`, preserves configuration/data outside
+the replaceable component directories, starts the backend on
+`127.0.0.1:8081`, and checks its health. The engine is a separately installed
+dynamic library; component manifests enforce engine, backend, storage, and
+runtime-frontend API compatibility, including the Rust dynamic-ABI identity,
+before replacement. On macOS the staging command uses a staging-scoped
+launchd job so the backend survives the deployment shell. The first run creates
 `~/Deployments/FPA-Staging/config/server.config.toml`; add the localhost
 Google OAuth credentials there before testing sign-in, then restart with:
 
@@ -64,5 +70,13 @@ Google OAuth credentials there before testing sign-in, then restart with:
 ```
 
 The copied `fpa-stage` command also supports `status`, `logs`, `stop`,
-`start`, and `redeploy`. `redeploy` deletes/replaces only `app/`; it leaves
-`config/`, `data/`, `logs/`, `artifacts/`, and `deploy/` intact.
+`start`, `deploy-component`, `redeploy-component`, and `recover`. Component
+deployment deletes/replaces only the selected component. `recover` deletes
+all four component directories and reinstalls their recorded artifacts while
+leaving `config/`, `data/`, `logs/`, `artifacts/`, and `deploy/` intact.
+
+Run the isolated L3 deployment acceptance drill with:
+
+```bash
+./scripts/test-component-deployment.sh
+```

@@ -135,6 +135,9 @@ pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "engine_version": ledgerzero_engine::ENGINE_VERSION,
+        "engine_api": ledgerzero_engine::ENGINE_API_VERSION,
+        "storage_format": ledgerzero_engine::STORAGE_FORMAT_VERSION,
+        "backend_api": 1,
     }))
 }
 
