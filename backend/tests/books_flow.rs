@@ -278,6 +278,32 @@ async fn create_book_rejects_non_owner() {
 }
 
 #[tokio::test]
+async fn unassigned_non_owner_cannot_discover_or_operate_an_open_book() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_over(dir.path());
+    let owner_cookie = dev_login(&app, OWNER).await;
+    let (book_id, _entity_id) = create_book(&app, &owner_cookie, "Private Books").await;
+    let stranger_cookie = dev_login(&app, "someone.else@example.com").await;
+
+    let mine = get(&app, "/api/books/mine", &stranger_cookie).await;
+    assert_eq!(mine.status(), StatusCode::OK);
+    assert!(body_json(mine).await.as_array().unwrap().is_empty());
+
+    let denied = post(
+        &app,
+        &format!("/api/books/{book_id}/resource-types"),
+        &stranger_cookie,
+        json!({
+            "op_id": Uuid::new_v4(), "name": "US Dollar", "kind": "CURRENCY",
+            "code": "USD", "unit_of_measure": "USD", "precision": 2
+        }),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(denied).await["error_code"], "UNAUTHORIZED_API");
+}
+
+#[tokio::test]
 async fn book_api_on_unopened_book_is_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_over(dir.path());

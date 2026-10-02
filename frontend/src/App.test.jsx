@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
@@ -73,6 +73,65 @@ describe("FPA application shell", () => {
     await user.click(screen.getByRole("button", { name: "Workflows & roles" }));
     expect((await screen.findAllByText("Record receipt")).length).toBeGreaterThan(0);
     expect(screen.queryByRole("link", { name: "Launch workflow" })).toBeNull();
+  });
+
+  it("finishes a posted entry with cleared required fields and fresh client identifiers", async () => {
+    let uuidSequence = 0;
+    crypto.randomUUID.mockImplementation(() => `00000000-0000-4000-8000-${String(++uuidSequence).padStart(12, "0")}`);
+    const chartId = "55555555-5555-4555-8555-555555555555";
+    const cashId = "66666666-6666-4666-8666-666666666666";
+    const revenueId = "77777777-7777-4777-8777-777777777777";
+    const postedBodies = [];
+    const accounts = [
+      { account_id: cashId, chart_id: chartId, name: "Cash", code: "1000", account_type: "ASSET", resource_type_id: "usd", is_active: true },
+      { account_id: revenueId, chart_id: chartId, name: "Revenue", code: "4000", account_type: "REVENUE", resource_type_id: "usd", is_active: true },
+    ];
+    const fetchMock = vi.fn((path, options = {}) => {
+      const value = String(path);
+      if (value === "/api/auth/config") return response({ providers: [], dev_login_enabled: true });
+      if (value === "/api/auth/me") return response({ user: { user_id: "owner-id", email: "owner@example.com", display_name: "Owner" }, is_bootstrap_owner: true, allowed_actions: [] });
+      if (value === "/api/books/mine") return response([book]);
+      if (value.includes("/workflows/mine")) return response([]);
+      if (value.endsWith("/entities")) return response([{ entity_id: book.entity_id, name: "Test Book" }]);
+      if (value.endsWith("/resource-types")) return response([{ resource_type_id: "usd", name: "US Dollar", code: "USD", kind: "CURRENCY", unit_of_measure: "USD", precision: 2 }]);
+      if (value.includes("/charts?")) return response([{ chart_id: chartId, name: "Primary", is_active: true }]);
+      if (value.includes("/accounts?")) return response(accounts);
+      if (value.includes("/accounts/") && value.endsWith("/balance")) return response({ debit_total: "0", credit_total: "0", natural: "0" });
+      if (value.endsWith("/entries") && options.method === "POST") {
+        const body = JSON.parse(options.body);
+        postedBodies.push(body);
+        return response({ id: body.entry_id });
+      }
+      if (value.includes("/entries?") || value.includes("/periods?") || value.endsWith("/prices") || value.endsWith("/audit-log") || value.includes("/workflows?") || value.includes("/roles?") || value.endsWith("/workflow-artifacts") || value.endsWith("/users")) return response([]);
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /Test Book/ }));
+    await user.click(await screen.findByRole("button", { name: "Ledger" }));
+    const entryForm = within(screen.getByRole("heading", { name: "Post balanced entry" }).closest("form"));
+
+    await user.type(entryForm.getByLabelText("Description"), "Initial funding");
+    await user.type(entryForm.getByLabelText("Amount"), "125.00");
+    await user.selectOptions(entryForm.getByLabelText("Debit account"), cashId);
+    await user.selectOptions(entryForm.getByLabelText("Credit account"), revenueId);
+    expect(screen.queryByText(/Idempotency key/)).toBeNull();
+    await user.click(entryForm.getByRole("button", { name: "Post entry" }));
+
+    await waitFor(() => expect(postedBodies).toHaveLength(1));
+    await waitFor(() => expect(entryForm.getByLabelText("Description").value).toBe(""));
+    expect(entryForm.getByLabelText("Amount").value).toBe("");
+    expect(entryForm.getByLabelText("Debit account").value).toBe(cashId);
+    expect(entryForm.getByLabelText("Credit account").value).toBe(revenueId);
+
+    await user.type(entryForm.getByLabelText("Description"), "Second funding");
+    await user.type(entryForm.getByLabelText("Amount"), "50.00");
+    await user.click(entryForm.getByRole("button", { name: "Post entry" }));
+    await waitFor(() => expect(postedBodies).toHaveLength(2));
+    expect(postedBodies[1].entry_id).not.toBe(postedBodies[0].entry_id);
+    expect(postedBodies[1].lines[0].line_id).not.toBe(postedBodies[0].lines[0].line_id);
+    expect(postedBodies[1].lines[1].line_id).not.toBe(postedBodies[0].lines[1].line_id);
   });
 
   it("requires a blank current-book passphrase when the owner initiates transfer", async () => {
