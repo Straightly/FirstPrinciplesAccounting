@@ -1858,6 +1858,20 @@ impl AccountingEngine {
             .collect()
     }
 
+    /// Users currently assigned to a role. Exposed for the owner
+    /// administration read model; mutation still goes through the immutable
+    /// role-assignment event path.
+    pub fn users_for_role(&self, role_id: Uuid) -> Vec<Uuid> {
+        let mut users: Vec<Uuid> = self
+            .state
+            .role_assignments
+            .get(&role_id)
+            .map(|values| values.iter().copied().collect())
+            .unwrap_or_default();
+        users.sort();
+        users
+    }
+
     pub fn get_entry(&self, entry_id: Uuid) -> Option<&JournalEntry> {
         self.state.entries.get(&entry_id)
     }

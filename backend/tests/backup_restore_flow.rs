@@ -26,6 +26,7 @@ fn test_config(books_dir: &std::path::Path, dev_artifacts_dir: &std::path::Path)
         books_dir: books_dir.to_string_lossy().to_string(),
         frontend_dist: "./nonexistent-dist".to_string(),
         dev_artifacts_dir: dev_artifacts_dir.to_string_lossy().to_string(),
+        generated_workflows_dir: dev_artifacts_dir.to_string_lossy().to_string(),
         ops_audit_log: audit_path.to_string_lossy().to_string(),
         bootstrap_owner_email: OWNER.to_string(),
         session_ttl_seconds: 3600,

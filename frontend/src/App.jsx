@@ -1,296 +1,145 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, errorText } from "./api.js";
+import OwnerWorkspace from "./OwnerWorkspace.jsx";
 
-// LedgerZero launcher (M1): login, session, identity & authority.
-// M5 adds the workflow menu: every deployed workflow the signed-in user
-// holds a role for, navigating out to each workflow's own standalone route.
-// M6 replaces the M5 book_id/entity_id text inputs with a real bootstrapped
-// picker, so a non-owner user with a role assignment never needs to already
-// know a raw id. M7 constrains every book to exactly one entity (a book's
-// key/owner is now also its accounting boundary), so the picker is a single
-// book-selection step — the book's entity_id comes along for free.
+function Button({ children, kind = "primary", ...props }) {
+  return <button className={`button ${kind === "primary" ? "" : kind}`} {...props}>{children}</button>;
+}
 
-const box = {
-  maxWidth: 480,
-  margin: "10vh auto",
-  padding: 24,
-  fontFamily: "system-ui, sans-serif",
-  border: "1px solid #ddd",
-  borderRadius: 8,
-};
-const button = {
-  padding: "8px 16px",
-  marginRight: 8,
-  marginTop: 8,
-  cursor: "pointer",
-};
+function Login({ authConfig, message, setMessage, onLogin }) {
+  const [devEmail, setDevEmail] = useState("");
+  async function devLogin(event) {
+    event.preventDefault();
+    const result = await api("/api/auth/dev-login", { method: "POST", body: JSON.stringify({ email: devEmail }) });
+    if (result.ok) { setMessage(""); onLogin(result.body); }
+    else setMessage(errorText(result));
+  }
+  return <main className="login">
+    <h1>First Principles Accounting</h1>
+    <p>Sign in to open your accounting workspace.</p>
+    {(authConfig.providers || []).map((provider) => <Button key={provider.id} onClick={() => { window.location.href = `/api/auth/${provider.id}/login`; }}>Sign in with {provider.display_name}</Button>)}
+    {authConfig.dev_login_enabled && <form onSubmit={devLogin}>
+      <p className="warning">Development login is enabled. Do not use this mode on a shared deployment.</p>
+      <label className="field">Email<input type="email" required value={devEmail} onChange={(event) => setDevEmail(event.target.value)} /></label>
+      <Button type="submit">Development sign in</Button>
+    </form>}
+    {(authConfig.providers || []).length === 0 && !authConfig.dev_login_enabled && <p className="error">No login method is configured.</p>}
+    {message && <p className="error">{message}</p>}
+  </main>;
+}
 
-async function api(path, options) {
-  const response = await fetch(path, options);
-  const body = await response.json().catch(() => ({}));
-  return { ok: response.ok, status: response.status, body };
+function MyWorkflows({ book, workflows, loading }) {
+  const available = (workflows || []).filter((workflow) => workflow.artifact_available !== false);
+  const unavailable = (workflows || []).filter((workflow) => workflow.artifact_available === false);
+  return <section className="panel">
+    <h2>My workflows</h2>
+    <p className="muted">Only workflows granted to your assigned roles appear here. Each opens as an independent application.</p>
+    {!book && <p>Select a book to see your workflows.</p>}
+    {loading && <p className="muted">Refreshing workflows…</p>}
+    {book && workflows && available.length === 0 && <p className="muted">No available workflows are assigned to you in this book.</p>}
+    <div className="workflow-list">
+      {available.map((workflow) => <article className="workflow-card" key={workflow.workflow_deployment_id}>
+        <h3>{workflow.workflow_name}</h3>
+        <p className="muted">{workflow.description || "No description"}</p>
+        <a className="button" href={`${workflow.frontend_route}?book_id=${book.book_id}&entity_id=${book.entity_id}`}>Launch workflow</a>
+      </article>)}
+    </div>
+    {unavailable.length > 0 && <div className="warning">{unavailable.length} assigned workflow artifact{unavailable.length === 1 ? " is" : "s are"} missing or modified and cannot be launched.</div>}
+  </section>;
 }
 
 export default function App() {
   const [authConfig, setAuthConfig] = useState(null);
   const [me, setMe] = useState(null);
-  const [devEmail, setDevEmail] = useState("");
-  const [message, setMessage] = useState("");
   const [books, setBooks] = useState(null);
   const [selectedBookId, setSelectedBookId] = useState("");
-  const [myWorkflows, setMyWorkflows] = useState(null);
-  const [pickerError, setPickerError] = useState("");
-  const [newOwnerEmail, setNewOwnerEmail] = useState("");
-  const [newOwnerPassphrase, setNewOwnerPassphrase] = useState("");
+  const [workflows, setWorkflows] = useState(null);
+  const [loadingWorkflows, setLoadingWorkflows] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
+  const selectedBook = useMemo(() => (books || []).find((book) => book.book_id === selectedBookId) || null, [books, selectedBookId]);
+  const isBookOwner = Boolean(selectedBook && me && selectedBook.owner_email.toLowerCase() === me.user.email.toLowerCase());
 
-  async function loadMe() {
-    const r = await api("/api/auth/me");
-    setMe(r.ok ? r.body : null);
-  }
-
-  useEffect(() => {
-    api("/api/auth/config").then((r) => setAuthConfig(r.ok ? r.body : {}));
-    loadMe();
-    if (new URLSearchParams(window.location.search).get("login_error")) {
-      setMessage("Google login was cancelled or denied.");
-    }
-  }, []);
-
-  async function devLogin(e) {
-    e.preventDefault();
-    const r = await api("/api/auth/dev-login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: devEmail }),
-    });
-    if (r.ok) {
-      setMe(r.body);
-      setMessage("");
-    } else {
-      setMessage(`${r.body.error_code}: ${r.body.message}`);
-    }
-  }
-
-  async function adminPing() {
-    const r = await api("/api/admin/ping");
-    setMessage(
-      r.ok
-        ? `admin ping: ${r.body.message} (owner ${r.body.owner})`
-        : `${r.body.error_code}: ${r.body.message}`
-    );
-  }
-
-  async function refresh() {
-    const r = await api("/api/auth/refresh", { method: "POST" });
-    setMessage(r.ok ? "Session token rotated." : `${r.body.error_code}: ${r.body.message}`);
-  }
-
-  async function logout() {
-    await api("/api/auth/logout", { method: "POST" });
-    setMe(null);
-    setMessage("");
-  }
-
-  async function changeOwner(e) {
-    e.preventDefault();
-    if (!selectedBook) return;
-    const r = await api(`/api/books/${selectedBook.book_id}/workflows/change-owner`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        op_id: crypto.randomUUID(),
-        new_owner_email: newOwnerEmail,
-        new_passphrase: newOwnerPassphrase,
-      }),
-    });
-    if (r.ok) {
-      setBooks((current) => (current || []).filter((b) => b.book_id !== selectedBook.book_id));
-      setSelectedBookId("");
-      setNewOwnerEmail("");
-      setNewOwnerPassphrase("");
-      setMessage(`Ownership transferred to ${r.body.owner_email}. Your owner access ended immediately.`);
-    } else {
-      setMessage(`${r.body.error_code}: ${r.body.message}`);
-    }
-  }
-
-  // Book picker (Impl Spec §6.5/§7.1, Impl Plan M6/M7): a bootstrapped
-  // launcher capability, the same kind as "Open book"/"Adding a workflow" —
-  // not a deployed workflow artifact. The owner sees every book; any other
-  // signed-in user sees only ones where they hold a workflow-granting role,
-  // discovered purely from server-side role assignments. Each book already
-  // carries its one entity_id (M7: a book has exactly one entity), so
-  // selecting a book is the only step needed before the workflow menu.
-  useEffect(() => {
+  const loadBooks = useCallback(async () => {
     if (!me) return;
-    setPickerError("");
-    api("/api/books/mine").then((r) => {
-      if (r.ok) setBooks(r.body);
-      else setPickerError(`${r.body.error_code}: ${r.body.message}`);
-    });
+    const result = await api("/api/books/mine");
+    if (result.ok) {
+      setBooks(result.body);
+      setSelectedBookId((current) => result.body.some((book) => book.book_id === current) ? current : "");
+      setError("");
+    } else setError(errorText(result));
   }, [me]);
 
-  const selectedBook = (books || []).find((b) => b.book_id === selectedBookId);
+  const loadWorkflows = useCallback(async () => {
+    if (!selectedBook) { setWorkflows(null); return; }
+    if (!selectedBook.is_open) { setWorkflows([]); return; }
+    setLoadingWorkflows(true);
+    const result = await api(`/api/books/${selectedBook.book_id}/workflows/mine?entity_id=${selectedBook.entity_id}`);
+    setLoadingWorkflows(false);
+    if (result.ok) { setWorkflows(result.body); setError(""); }
+    else setError(errorText(result));
+  }, [selectedBook]);
 
-  // Impl Plan M9: a restored book's ledger can outlive its dev artifacts —
-  // don't offer a link that can only 404 or serve stale code.
-  const availableWorkflows = (myWorkflows || []).filter(
-    (w) => w.artifact_available !== false
-  );
+  const refreshAll = useCallback(async (reason = "manual") => {
+    await loadBooks();
+    setRefreshEpoch((value) => value + 1);
+    if (reason === "manual") setMessage("Workspace refreshed.");
+  }, [loadBooks]);
 
   useEffect(() => {
-    setMyWorkflows(null);
-    if (!selectedBookId || !books) return;
-    const book = books.find((b) => b.book_id === selectedBookId);
-    if (!book) return;
-    setPickerError("");
-    api(
-      `/api/books/${book.book_id}/workflows/mine?entity_id=${book.entity_id}`
-    ).then((r) => {
-      if (r.ok) setMyWorkflows(r.body);
-      else setPickerError(`${r.body.error_code}: ${r.body.message}`);
+    Promise.all([api("/api/auth/config"), api("/api/auth/me")]).then(([config, identity]) => {
+      setAuthConfig(config.ok ? config.body : {});
+      setMe(identity.ok ? identity.body : null);
     });
-  }, [selectedBookId, books]);
+    if (new URLSearchParams(window.location.search).get("login_error")) setMessage("Google login was cancelled or denied.");
+  }, []);
+  useEffect(() => { loadBooks(); }, [loadBooks]);
+  useEffect(() => { loadWorkflows(); }, [loadWorkflows, refreshEpoch]);
+  useEffect(() => {
+    function onFocus() { if (me) refreshAll("focus"); }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [me, refreshAll]);
 
-  if (authConfig === null) {
-    return <div style={box}>Loading…</div>;
+  async function rotateSession() {
+    const result = await api("/api/auth/refresh", { method: "POST" });
+    if (result.ok) setMessage("Session token rotated."); else setError(errorText(result));
+  }
+  async function logout() {
+    await api("/api/auth/logout", { method: "POST" });
+    setMe(null); setBooks(null); setSelectedBookId(""); setWorkflows(null); setMessage(""); setError("");
   }
 
-  if (!me) {
-    return (
-      <div style={box}>
-        <h1>LedgerZero</h1>
-        <p>Sign in to continue.</p>
-        {(authConfig.providers || []).map((p) => (
-          <button
-            key={p.id}
-            style={button}
-            onClick={() => (window.location.href = `/api/auth/${p.id}/login`)}
-          >
-            Sign in with {p.display_name}
-          </button>
-        ))}
-        {authConfig.dev_login_enabled && (
-          <form onSubmit={devLogin}>
-            <p style={{ color: "#a00" }}>Dev login (local development only):</p>
-            <input
-              type="email"
-              placeholder="email"
-              value={devEmail}
-              onChange={(e) => setDevEmail(e.target.value)}
-              style={{ padding: 8, width: "60%" }}
-            />
-            <button style={button} type="submit">
-              Dev sign in
-            </button>
-          </form>
-        )}
-        {(authConfig.providers || []).length === 0 && !authConfig.dev_login_enabled && (
-          <p style={{ color: "#a00" }}>
-            No login method configured. Add an [[auth_providers]] block in
-            server.config.toml.
-          </p>
-        )}
-        {message && <p>{message}</p>}
+  if (authConfig === null) return <main className="login"><p>Loading FPA…</p></main>;
+  if (!me) return <Login authConfig={authConfig} message={message} setMessage={setMessage} onLogin={setMe} />;
+
+  return <div className="shell">
+    <header className="topbar">
+      <div className="brand"><h1>First Principles Accounting</h1><p>{me.user.display_name} · {me.user.email}</p></div>
+      <div className="top-actions">
+        <Button kind="secondary" onClick={() => refreshAll("manual")}>Refresh</Button>
+        <Button kind="secondary" onClick={rotateSession}>Rotate session</Button>
+        <Button kind="secondary" onClick={logout}>Sign out</Button>
       </div>
-    );
-  }
-
-  return (
-    <div style={box}>
-      <h1>LedgerZero</h1>
-      <p>
-        Signed in as <strong>{me.user.display_name}</strong> ({me.user.email})
-      </p>
-      <p style={{ fontSize: 12, color: "#666" }}>user_id: {me.user.user_id}</p>
-      <p>
-        Bootstrap owner: <strong>{me.is_bootstrap_owner ? "yes" : "no"}</strong>
-      </p>
-      <p>
-        Allowed actions:{" "}
-        {me.allowed_actions.length > 0 ? me.allowed_actions.join(", ") : "none"}
-      </p>
-      <hr />
-      <button style={button} onClick={adminPing}>
-        Test owner-gated endpoint
-      </button>
-      <button style={button} onClick={refresh}>
-        Rotate session
-      </button>
-      <button style={button} onClick={logout}>
-        Sign out
-      </button>
-      {message && <p>{message}</p>}
-      <hr />
-      <h2 style={{ fontSize: 16 }}>My workflows</h2>
-      {books === null && <p style={{ color: "#666" }}>Loading books…</p>}
-      {books && books.length === 0 && (
-        <p style={{ color: "#666" }}>No books available to you yet.</p>
-      )}
-      {books && books.length > 0 && (
-        <label style={{ display: "block" }}>
-          Book
-          <select
-            value={selectedBookId}
-            onChange={(e) => setSelectedBookId(e.target.value)}
-            style={{ display: "block", padding: 8, width: "100%", marginTop: 4 }}
-          >
-            <option value="">Choose a book…</option>
-            {books.map((b) => (
-              <option key={b.book_id} value={b.book_id}>
-                {b.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {pickerError && <p style={{ color: "#a00" }}>{pickerError}</p>}
-      {myWorkflows && availableWorkflows.length === 0 && (
-        <p style={{ color: "#666" }}>
-          No workflows in this book are assigned to you.
-        </p>
-      )}
-      {myWorkflows && availableWorkflows.length > 0 && selectedBook && (
-        <ul>
-          {availableWorkflows.map((w) => (
-            <li key={w.workflow_deployment_id}>
-              <a
-                href={`${w.frontend_route}?book_id=${selectedBook.book_id}&entity_id=${selectedBook.entity_id}`}
-              >
-                {w.workflow_name}
-              </a>
-            </li>
-          ))}
-        </ul>
-      )}
-      {selectedBook && selectedBook.owner_email.toLowerCase() === me.user.email.toLowerCase() && (
-        <>
-          <hr />
-          <h2 style={{ fontSize: 16 }}>Change owner</h2>
-          <p style={{ fontSize: 13 }}>
-            This transfers control immediately and replaces the passphrase used to open the book.
-          </p>
-          <form onSubmit={changeOwner}>
-            <input
-              type="email"
-              required
-              placeholder="New owner email"
-              value={newOwnerEmail}
-              onChange={(e) => setNewOwnerEmail(e.target.value)}
-              style={{ display: "block", padding: 8, width: "100%", marginTop: 4 }}
-            />
-            <input
-              type="password"
-              required
-              minLength={8}
-              placeholder="New owner passphrase"
-              value={newOwnerPassphrase}
-              onChange={(e) => setNewOwnerPassphrase(e.target.value)}
-              style={{ display: "block", padding: 8, width: "100%", marginTop: 8 }}
-            />
-            <button style={button} type="submit">Transfer ownership</button>
-          </form>
-        </>
-      )}
+    </header>
+    <div className="layout">
+      <aside className="sidebar">
+        <h2>Books</h2>
+        {books === null && <p className="muted">Loading books…</p>}
+        {books && books.length === 0 && <p className="muted">No books are available yet.</p>}
+        <div className="book-list">{(books || []).map((book) => <button className={`book ${book.book_id === selectedBookId ? "active" : ""}`} key={book.book_id} onClick={() => setSelectedBookId(book.book_id)}>
+          <strong>{book.name}</strong><span className={`status ${book.is_open ? "good" : ""}`}>{book.is_open ? "open" : "closed"}</span><div className="muted">{book.owner_email}</div>
+        </button>)}</div>
+        <p className="muted">User ID<br /><code>{me.user.user_id}</code></p>
+        <p className="muted">Bootstrap owner: {me.is_bootstrap_owner ? "yes" : "no"}</p>
+      </aside>
+      <main className="content">
+        {message && <div className="message">{message}</div>}
+        {error && <div className="error">{error}</div>}
+        <MyWorkflows book={selectedBook} workflows={workflows} loading={loadingWorkflows} />
+        <OwnerWorkspace me={me} books={books || []} book={selectedBook} isBookOwner={isBookOwner} refreshEpoch={refreshEpoch} onChanged={refreshAll} setMessage={setMessage} setError={setError} selectBook={setSelectedBookId} />
+      </main>
     </div>
-  );
+  </div>;
 }

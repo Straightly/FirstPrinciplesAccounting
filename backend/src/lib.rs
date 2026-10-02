@@ -17,3 +17,4 @@ pub mod error;
 pub mod sessions;
 pub mod state;
 pub mod users;
+pub mod workflow_generation;

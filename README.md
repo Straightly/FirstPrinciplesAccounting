@@ -12,7 +12,7 @@ A first-principles, AI-native accounting platform. Authoritative documents:
 
 - `engine/` — Rust crate: the `AccountingEngine` (invariants, domain, storage boundary)
 - `backend/` — Rust crate: routing server + runtime backend (Axum); the only component with storage access
-- `frontend/` — React + Vite launcher (login, session, workflow menu); each workflow is later deployed as its own self-contained React app
+- `frontend/` — React + Vite application shell (identity, books, accounting administration, workflow/role administration); each workflow is deployed as its own self-contained React app
 - `mcp_server/` — Python MCP server + dev-time backend (LLM/workflow generation); no accounting storage access
 - `scripts/check.sh` — upgrades dependencies, then builds and tests everything
 
@@ -74,6 +74,8 @@ The copied `fpa-stage` command also supports `status`, `logs`, `stop`,
 deployment deletes/replaces only the selected component. `recover` deletes
 all four component directories and reinstalls their recorded artifacts while
 leaving `config/`, `data/`, `logs/`, `artifacts/`, and `deploy/` intact.
+Workflow SPAs created through the running application live under persistent
+`data/generated-workflows`, not in the replaceable packaged-workflow component.
 
 Run the isolated L3 deployment acceptance drill with:
 

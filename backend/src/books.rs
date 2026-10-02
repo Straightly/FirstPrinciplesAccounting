@@ -269,6 +269,10 @@ impl BooksRegistry {
             })
     }
 
+    pub async fn is_open(&self, book_id: Uuid) -> bool {
+        self.open.read().await.contains_key(&book_id)
+    }
+
     /// Every currently open book (Impl Plan M6): the picker's discovery
     /// scope for non-owner users is intentionally limited to books already
     /// open in this process, not every book folder on disk — a book a

@@ -51,6 +51,12 @@ pub struct ServerConfig {
     /// accounting context.
     #[serde(default = "default_dev_artifacts_dir")]
     pub dev_artifacts_dir: String,
+    /// Persistent store for workflow SPAs created through the running
+    /// application.  This deliberately lives outside replaceable component
+    /// directories so a launcher or packaged-workflow deployment cannot
+    /// erase user-created workflows.
+    #[serde(default = "default_generated_workflows_dir")]
+    pub generated_workflows_dir: String,
     pub ops_audit_log: String,
     /// On a fresh install, only this authenticated identity may create or open
     /// books and reach owner-gated endpoints (Impl Spec §5.3).
@@ -78,6 +84,10 @@ fn default_secure_session_cookies() -> bool {
 
 fn default_dev_artifacts_dir() -> String {
     "./dev_artifacts".to_string()
+}
+
+fn default_generated_workflows_dir() -> String {
+    "./data/generated-workflows".to_string()
 }
 
 impl ServerConfig {

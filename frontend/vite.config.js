@@ -5,6 +5,9 @@ import react from "@vitejs/plugin-react";
 // In dev, Vite proxies API calls to the local backend.
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: "jsdom",
+  },
   server: {
     proxy: {
       "/api": "http://localhost:8080"

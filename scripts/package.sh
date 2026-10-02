@@ -107,14 +107,14 @@ fi
 cp server.config.example.toml "$BACKEND_ROOT/"
 cp docs/LedgerZero_Run_and_Deploy.md "$BACKEND_ROOT/DEPLOY.md"
 BACKEND_HASH=$(shasum -a 256 "$BACKEND_ROOT/ledgerzero-backend" | awk '{print $1}')
-write_manifest "$BACKEND_ROOT" backend "$BACKEND_HASH" 'backend_api=1' 'requires_engine_api=1' 'requires_storage_format=1' "requires_rust_abi=$RUST_ABI"
+write_manifest "$BACKEND_ROOT" backend "$BACKEND_HASH" 'backend_api=2' 'backend_api_compat_min=1' 'requires_engine_api=1' 'requires_storage_format=1' "requires_rust_abi=$RUST_ABI"
 archive_component backend "$BACKEND_ROOT"
 
 LAUNCHER_ROOT="$OUTPUT_DIR/ledgerzero-launcher-${VERSION}"
 mkdir -p "$LAUNCHER_ROOT"
 cp -R frontend/dist "$LAUNCHER_ROOT/dist"
 LAUNCHER_HASH=$(find "$LAUNCHER_ROOT/dist" -type f -exec shasum -a 256 {} \; | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')
-write_manifest "$LAUNCHER_ROOT" launcher "$LAUNCHER_HASH" 'requires_backend_api=1'
+write_manifest "$LAUNCHER_ROOT" launcher "$LAUNCHER_HASH" 'requires_backend_api=2'
 archive_component launcher "$LAUNCHER_ROOT"
 
 RUNTIME_ROOT="$OUTPUT_DIR/ledgerzero-runtime-frontends-${VERSION}"
@@ -133,7 +133,7 @@ source_revision=$REVISION
 source_state=$GIT_STATE
 platform=$PLATFORM
 engine_api=1
-backend_api=1
+backend_api=2
 storage_format=1
 runtime_frontend_api=1
 rust_abi=$RUST_ABI

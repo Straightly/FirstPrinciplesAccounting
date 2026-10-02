@@ -38,6 +38,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/books/{book_id}/close", post(books_api::close_book))
         .route("/books/{book_id}/backup", post(books_api::backup_book))
         .route("/books/{book_id}/entities", get(books_api::list_entities))
+        .route("/books/{book_id}/users", get(books_api::list_users))
         .route(
             "/books/{book_id}/resource-types",
             get(books_api::list_resource_types).post(books_api::create_resource_type),
@@ -93,6 +94,10 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/books/{book_id}/workflows", get(books_api::list_workflows))
         .route(
+            "/books/{book_id}/workflow-artifacts",
+            get(books_api::list_workflow_artifacts).post(books_api::generate_workflow_artifact),
+        )
+        .route(
             "/books/{book_id}/workflows/mine",
             get(books_api::my_workflows),
         )
@@ -120,8 +125,14 @@ pub fn build_router(state: SharedState) -> Router {
     // Deployed workflow artifacts (Impl Spec §7.1, §7.4): static assets only
     // — authorization happens at the backend API calls the artifact makes,
     // not at the point of fetching its own HTML/JS.
-    let workflows_dir = Path::new(&state.config.dev_artifacts_dir).join("workflows");
-    let workflows_service = ServeDir::new(&workflows_dir);
+    let packaged_workflows_dir = Path::new(&state.config.dev_artifacts_dir).join("workflows");
+    let generated_workflows_dir =
+        Path::new(&state.config.generated_workflows_dir).join("workflows");
+    // Runtime-created workflows are persistent application data and take
+    // precedence over packaged artifacts. Packaged artifacts remain an
+    // independently replaceable component.
+    let workflows_service =
+        ServeDir::new(&generated_workflows_dir).fallback(ServeDir::new(&packaged_workflows_dir));
 
     // Impl Plan M10 (hardening): method/path/status/latency only — never
     // headers or bodies, so session tokens, cookies, and passphrases in

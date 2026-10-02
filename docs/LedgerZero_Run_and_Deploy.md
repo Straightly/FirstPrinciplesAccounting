@@ -135,7 +135,8 @@ Required config changes on a remote machine:
   Google OAuth requires HTTPS redirect URIs on non-localhost hosts.
 - `redirect_url` in each `[[auth_providers]]` block must match the public
   hostname, and the same URI must be authorized in the provider's console.
-- `frontend_dist`, `books_dir`, `ops_audit_log`, `dev_artifacts_dir`:
+- `frontend_dist`, `books_dir`, `ops_audit_log`, `dev_artifacts_dir`,
+  `generated_workflows_dir`:
   absolute paths, or run with `WorkingDirectory` set to match the relative
   ones (the packaged tarball's example config assumes the latter).
 

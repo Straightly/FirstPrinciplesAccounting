@@ -13,6 +13,7 @@ frontend_dist = "./frontend/dist"
 # Dev-time artifact store (spec §7.4) — deployed workflow artifacts, separate
 # from book storage; never contains private accounting context.
 dev_artifacts_dir = "./dev_artifacts"
+generated_workflows_dir = "./data/generated-workflows"
 
 # Operational audit log (failed auth attempts etc.) — separate from any ledger.
 ops_audit_log = "./ops_audit.jsonl"

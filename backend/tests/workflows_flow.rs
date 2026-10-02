@@ -25,6 +25,10 @@ fn test_config(books_dir: &std::path::Path, dev_artifacts_dir: &std::path::Path)
         books_dir: books_dir.to_string_lossy().to_string(),
         frontend_dist: "./nonexistent-dist".to_string(),
         dev_artifacts_dir: dev_artifacts_dir.to_string_lossy().to_string(),
+        generated_workflows_dir: dev_artifacts_dir
+            .join("persistent-generated")
+            .to_string_lossy()
+            .to_string(),
         ops_audit_log: audit_path.to_string_lossy().to_string(),
         bootstrap_owner_email: OWNER.to_string(),
         session_ttl_seconds: 3600,
@@ -669,4 +673,131 @@ async fn book_and_entity_picker_requires_authentication() {
     let app = app_over(books_dir.path(), artifacts_dir.path());
     let response = call(&app, Method::GET, "/api/books/mine", None, None).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn l4_browser_generation_deployment_and_email_assignment_lifecycle() {
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let frontend_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(frontend_dir.path().join("workflow")).unwrap();
+    std::fs::write(
+        frontend_dir.path().join("workflow/workflow-react.js"),
+        "export const React = {}; export function createRoot() {}",
+    )
+    .unwrap();
+    let mut config = test_config(books_dir.path(), artifacts_dir.path());
+    config.frontend_dist = frontend_dir.path().to_string_lossy().to_string();
+    let app = build_router(Arc::new(AppState::new(config)));
+    let (owner_cookie, _) = dev_login(&app, OWNER).await;
+    let (book_id, entity_id) = create_book(&app, &owner_cookie).await;
+
+    let generated = post(
+        &app,
+        &format!("/api/books/{book_id}/workflow-artifacts"),
+        &owner_cookie,
+        json!({
+            "workflow_name": "L4 browser journal",
+            "description": "Generated from the packaged browser template"
+        }),
+    )
+    .await;
+    assert_eq!(generated.status(), StatusCode::OK);
+    let generated = body_json(generated).await;
+    let deployment_id = generated["workflow_deployment_id"].as_str().unwrap();
+    let workflow_id = generated["workflow_id"].as_str().unwrap();
+    let artifact_dir = artifacts_dir
+        .path()
+        .join("persistent-generated/workflows")
+        .join(deployment_id);
+    assert!(artifact_dir.join("workflow.json").is_file());
+    assert!(artifact_dir.join("manifest.json").is_file());
+    assert!(artifact_dir.join("code/index.html").is_file());
+    assert!(artifact_dir.join("code/app.js").is_file());
+    assert!(artifact_dir.join("code/workflow-react.js").is_file());
+
+    let artifacts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/workflow-artifacts"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert!(artifacts
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| { artifact["workflow_deployment_id"] == deployment_id }));
+
+    let deployed = post(
+        &app,
+        &format!("/api/books/{book_id}/workflows/deploy"),
+        &owner_cookie,
+        json!({
+            "workflow_deployment_id": deployment_id,
+            "workflow_id": workflow_id,
+            "entity_id": entity_id,
+            "workflow_name": generated["workflow_name"],
+            "description": generated["description"],
+            "backend_api_calls": generated["backend_api_calls"],
+            "required_inputs": generated["required_inputs"]
+        }),
+    )
+    .await;
+    assert_eq!(deployed.status(), StatusCode::OK);
+
+    let standalone = call(
+        &app,
+        Method::GET,
+        &format!("/workflows/{deployment_id}/code/index.html"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(standalone.status(), StatusCode::OK);
+    let standalone = standalone.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&standalone).contains("<title>FPA workflow</title>"));
+
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/roles?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let role_id = roles[0]["role_id"].as_str().unwrap();
+    let assigned = post(
+        &app,
+        &format!("/api/books/{book_id}/roles/{role_id}/users"),
+        &owner_cookie,
+        json!({ "op_id": Uuid::new_v4(), "user_email": EMPLOYEE }),
+    )
+    .await;
+    assert_eq!(assigned.status(), StatusCode::OK);
+
+    let (employee_cookie, employee_id) = dev_login(&app, EMPLOYEE).await;
+    let mine = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/workflows/mine?entity_id={entity_id}"),
+            &employee_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(mine.as_array().unwrap().len(), 1);
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/roles?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(roles[0]["assigned_user_ids"][0], employee_id.to_string());
 }

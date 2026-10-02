@@ -101,6 +101,14 @@ require_equal() {
   [[ -z "$left" || -z "$right" || "$left" == "$right" ]] || die "$message ($left != $right)"
 }
 
+require_api_supported() {
+  local provided="$1" minimum="$2" required="$3" message="$4"
+  [[ -n "$provided" && -n "$required" ]] || return 0
+  [[ -n "$minimum" ]] || minimum="$provided"
+  [[ "$provided" =~ ^[0-9]+$ && "$minimum" =~ ^[0-9]+$ && "$required" =~ ^[0-9]+$ ]] || die "$message (API values must be integers)"
+  (( required >= minimum && required <= provided )) || die "$message (backend supports $minimum..$provided, client requires $required)"
+}
+
 check_compatibility() {
   local candidate_component="${1:-}" candidate_manifest="${2:-}" engine_manifest backend_manifest launcher_manifest runtime_manifest
   engine_manifest="$ENGINE_DIR/component.manifest"
@@ -118,10 +126,10 @@ check_compatibility() {
     require_equal "$(manifest_value "$engine_manifest" rust_abi)" "$(manifest_value "$backend_manifest" requires_rust_abi)" "incompatible Rust dynamic ABI"
   fi
   if [[ -f "$backend_manifest" && -f "$launcher_manifest" ]]; then
-    require_equal "$(manifest_value "$backend_manifest" backend_api)" "$(manifest_value "$launcher_manifest" requires_backend_api)" "incompatible launcher/backend API"
+    require_api_supported "$(manifest_value "$backend_manifest" backend_api)" "$(manifest_value "$backend_manifest" backend_api_compat_min)" "$(manifest_value "$launcher_manifest" requires_backend_api)" "incompatible launcher/backend API"
   fi
   if [[ -f "$backend_manifest" && -f "$runtime_manifest" ]]; then
-    require_equal "$(manifest_value "$backend_manifest" backend_api)" "$(manifest_value "$runtime_manifest" requires_backend_api)" "incompatible runtime-frontend/backend API"
+    require_api_supported "$(manifest_value "$backend_manifest" backend_api)" "$(manifest_value "$backend_manifest" backend_api_compat_min)" "$(manifest_value "$runtime_manifest" requires_backend_api)" "incompatible runtime-frontend/backend API"
   fi
 }
 
@@ -167,7 +175,7 @@ all_components_installed() {
 }
 
 create_or_migrate_config() {
-  local example="$BACKEND_DIR/server.config.example.toml" port temporary
+  local example="$BACKEND_DIR/server.config.example.toml" port temporary generated_present=0
   if [[ ! -f "$CONFIG_FILE" ]]; then
     [[ -f "$example" ]] || die "backend artifact lacks server.config.example.toml"
     case "$DEFAULT_LISTEN_ADDR" in 127.0.0.1:* | localhost:* | '[::1]:'*) ;; *) die "staging address must be loopback-only" ;; esac
@@ -177,12 +185,14 @@ create_or_migrate_config() {
   fi
   port="$(read_listen_addr 2>/dev/null | awk -F: '{print $NF}')"
   [[ -n "$port" ]] || port="${DEFAULT_LISTEN_ADDR##*:}"
+  grep -q '^generated_workflows_dir = ' "$CONFIG_FILE" && generated_present=1
   temporary="$CONFIG_FILE.tmp"
-  awk -v initial="$DEFAULT_LISTEN_ADDR" -v books="$BOOKS_DIR" -v launcher="$LAUNCHER_DIR/dist" -v runtime="$RUNTIME_DIR" -v audit="$LOG_DIR/ops-audit.jsonl" -v redirect="http://localhost:${port}/api/auth/google/callback" '
+  awk -v initial="$DEFAULT_LISTEN_ADDR" -v books="$BOOKS_DIR" -v launcher="$LAUNCHER_DIR/dist" -v runtime="$RUNTIME_DIR" -v generated="$DATA_DIR/generated-workflows" -v generated_present="$generated_present" -v audit="$LOG_DIR/ops-audit.jsonl" -v redirect="http://localhost:${port}/api/auth/google/callback" '
     /^listen_addr = / && !seen { print "listen_addr = \"" initial "\""; seen=1; next }
     /^books_dir = / { print "books_dir = \"" books "\""; next }
     /^frontend_dist = / { print "frontend_dist = \"" launcher "\""; next }
-    /^dev_artifacts_dir = / { print "dev_artifacts_dir = \"" runtime "\""; next }
+    /^dev_artifacts_dir = / { print "dev_artifacts_dir = \"" runtime "\""; if (!generated_present) print "generated_workflows_dir = \"" generated "\""; next }
+    /^generated_workflows_dir = / { print "generated_workflows_dir = \"" generated "\""; generated_seen=1; next }
     /^ops_audit_log = / { print "ops_audit_log = \"" audit "\""; next }
     /^redirect_url = / && $0 ~ /localhost/ { print "redirect_url = \"" redirect "\""; next }
     { print }
@@ -272,7 +282,7 @@ install_component() {
       [[ -f "$top/lib/libledgerzero_engine.dylib" || -f "$top/lib/libledgerzero_engine.so" ]] || die "engine library is missing"
       ;;
     backend)
-      require_manifest_key "$manifest" backend_api; require_manifest_key "$manifest" requires_engine_api; require_manifest_key "$manifest" requires_storage_format; require_manifest_key "$manifest" requires_rust_abi
+      require_manifest_key "$manifest" backend_api; require_manifest_key "$manifest" backend_api_compat_min; require_manifest_key "$manifest" requires_engine_api; require_manifest_key "$manifest" requires_storage_format; require_manifest_key "$manifest" requires_rust_abi
       [[ -x "$top/ledgerzero-backend" ]] || die "backend executable is missing"
       description="$(file "$top/ledgerzero-backend")"
       case "$(uname -s)" in Darwin) [[ "$description" == *Mach-O* && "$description" == *"$(uname -m)"* ]] || die "backend is not a native macOS executable" ;; Linux) [[ "$description" == *ELF* ]] || die "backend is not a Linux executable" ;; esac

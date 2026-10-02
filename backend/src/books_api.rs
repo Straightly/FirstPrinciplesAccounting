@@ -85,6 +85,18 @@ pub struct ChartFilter {
     pub chart_id: Uuid,
 }
 
+/// GET /api/books/:book_id/users — identities known to this backend process. Assignment by
+/// email does not require a prior login, but this list gives the owner a
+/// human-readable review surface for identities seen or assigned so far.
+pub async fn list_users(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+) -> Result<Json<Vec<User>>, ApiError> {
+    let _ = book_context(&state, &headers, book_id).await?;
+    Ok(Json(state.users.list()))
+}
+
 // ---------------------------------------------------------------------------
 // Book lifecycle
 // ---------------------------------------------------------------------------
@@ -102,6 +114,13 @@ pub struct BookResponse {
     /// The book's one entity (Impl Plan M7), created automatically — no
     /// separate call is needed to learn it.
     pub entity_id: Uuid,
+}
+
+#[derive(Serialize)]
+pub struct BookSummary {
+    #[serde(flatten)]
+    pub meta: BookMeta,
+    pub is_open: bool,
 }
 
 #[derive(Deserialize)]
@@ -344,7 +363,7 @@ pub async fn restore_book(
 pub async fn list_books(
     State(state): State<SharedState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<BookMeta>>, ApiError> {
+) -> Result<Json<Vec<BookSummary>>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
     if let Err(err) = state.authz.authorize(&user, Action::ListBooks) {
         state.audit.record(
@@ -355,7 +374,14 @@ pub async fn list_books(
         );
         return Err(err);
     }
-    Ok(Json(state.books.list().await?))
+    let mut summaries = Vec::new();
+    for meta in state.books.list().await? {
+        summaries.push(BookSummary {
+            is_open: state.books.is_open(meta.book_id).await,
+            meta,
+        });
+    }
+    Ok(Json(summaries))
 }
 
 /// GET /api/books/mine — the launcher's book picker (Impl Plan M6). The
@@ -366,7 +392,7 @@ pub async fn list_books(
 pub async fn list_my_books(
     State(state): State<SharedState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<BookMeta>>, ApiError> {
+) -> Result<Json<Vec<BookSummary>>, ApiError> {
     let user = crate::auth::current_user(&state, &headers)?;
     let mut visible = Vec::new();
     for meta in state.books.list().await? {
@@ -391,7 +417,14 @@ pub async fn list_my_books(
             visible.push(meta);
         }
     }
-    Ok(Json(visible))
+    let mut summaries = Vec::new();
+    for meta in visible {
+        summaries.push(BookSummary {
+            is_open: state.books.is_open(meta.book_id).await,
+            meta,
+        });
+    }
+    Ok(Json(summaries))
 }
 
 // ---------------------------------------------------------------------------
@@ -793,7 +826,8 @@ pub struct DeployWorkflowRequest {
 
 /// POST /api/books/:book_id/workflows/deploy — bootstrap-owner-gated (the
 /// developer is the sole deploy authority in v1, Impl Spec §6.2). Reads the
-/// artifact the caller already wrote to `dev_artifacts_dir` under
+/// artifact the caller already wrote to either the persistent generated
+/// workflow store or packaged `dev_artifacts_dir` under
 /// `workflow_deployment_id`, hashes it (Impl Spec §7.4 — hashes are the
 /// identity authority), and registers the deployment plus its auto-role.
 pub async fn deploy_workflow(
@@ -803,10 +837,19 @@ pub async fn deploy_workflow(
     Json(body): Json<DeployWorkflowRequest>,
 ) -> Result<Json<IdResponse>, ApiError> {
     let (user, open_book) = book_context(&state, &headers, book_id).await?;
-    let dir = crate::dev_artifacts::workflow_dir(
+    let generated_dir = crate::dev_artifacts::workflow_dir(
+        &state.config.generated_workflows_dir,
+        body.workflow_deployment_id,
+    );
+    let packaged_dir = crate::dev_artifacts::workflow_dir(
         &state.config.dev_artifacts_dir,
         body.workflow_deployment_id,
     );
+    let dir = if generated_dir.is_dir() {
+        generated_dir
+    } else {
+        packaged_dir
+    };
     let hashed = crate::dev_artifacts::hash_artifact(&dir)
         .await
         .map_err(ApiError::invalid_input)?;
@@ -854,26 +897,38 @@ pub struct WorkflowSummary {
 /// the hashes recorded at deploy time — the same identity check
 /// `deploy_workflow` itself relies on (Impl Spec §7.4), reused here rather
 /// than reimplemented.
-async fn artifact_available(dev_artifacts_dir: &str, definition: &WorkflowDefinition) -> bool {
-    let dir =
-        crate::dev_artifacts::workflow_dir(dev_artifacts_dir, definition.workflow_deployment_id);
-    match crate::dev_artifacts::hash_artifact(&dir).await {
-        Ok(hashed) => {
-            hashed.manifest_hash == definition.manifest_hash
+async fn artifact_available(
+    dev_artifacts_dir: &str,
+    generated_workflows_dir: &str,
+    definition: &WorkflowDefinition,
+) -> bool {
+    for root in [generated_workflows_dir, dev_artifacts_dir] {
+        let dir = crate::dev_artifacts::workflow_dir(root, definition.workflow_deployment_id);
+        if let Ok(hashed) = crate::dev_artifacts::hash_artifact(&dir).await {
+            if hashed.manifest_hash == definition.manifest_hash
                 && hashed.code_hash == definition.code_hash
+            {
+                return true;
+            }
         }
-        Err(_) => false,
     }
+    false
 }
 
 async fn summarize_workflows(
     dev_artifacts_dir: &str,
+    generated_workflows_dir: &str,
     definitions: Vec<&WorkflowDefinition>,
 ) -> Vec<WorkflowSummary> {
     let mut out = Vec::with_capacity(definitions.len());
     for definition in definitions {
         out.push(WorkflowSummary {
-            artifact_available: artifact_available(dev_artifacts_dir, definition).await,
+            artifact_available: artifact_available(
+                dev_artifacts_dir,
+                generated_workflows_dir,
+                definition,
+            )
+            .await,
             definition: definition.clone(),
         });
     }
@@ -890,6 +945,7 @@ pub async fn list_workflows(
     let engine = open_book.engine.read().await;
     let summaries = summarize_workflows(
         &state.config.dev_artifacts_dir,
+        &state.config.generated_workflows_dir,
         engine.list_workflows(filter.entity_id),
     )
     .await;
@@ -910,10 +966,47 @@ pub async fn my_workflows(
     let engine = open_book.engine.read().await;
     let summaries = summarize_workflows(
         &state.config.dev_artifacts_dir,
+        &state.config.generated_workflows_dir,
         engine.workflows_authorized_for_user(user.user_id, filter.entity_id),
     )
     .await;
     Ok(Json(summaries))
+}
+
+pub async fn list_workflow_artifacts(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+) -> Result<Json<Vec<crate::workflow_generation::WorkflowArtifactSummary>>, ApiError> {
+    let _ = book_context(&state, &headers, book_id).await?;
+    let mut artifacts = crate::workflow_generation::list(&state.config.generated_workflows_dir)
+        .await
+        .map_err(ApiError::internal)?;
+    artifacts.extend(
+        crate::workflow_generation::list(&state.config.dev_artifacts_dir)
+            .await
+            .map_err(ApiError::internal)?,
+    );
+    artifacts.sort_by_key(|artifact| artifact.workflow_deployment_id);
+    artifacts.dedup_by_key(|artifact| artifact.workflow_deployment_id);
+    Ok(Json(artifacts))
+}
+
+pub async fn generate_workflow_artifact(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<crate::workflow_generation::GenerateWorkflowArtifactRequest>,
+) -> Result<Json<crate::workflow_generation::WorkflowArtifactSummary>, ApiError> {
+    let _ = book_context(&state, &headers, book_id).await?;
+    let artifact = crate::workflow_generation::generate(
+        &state.config.generated_workflows_dir,
+        &state.config.frontend_dist,
+        body,
+    )
+    .await
+    .map_err(ApiError::invalid_input)?;
+    Ok(Json(artifact))
 }
 
 #[derive(Deserialize)]
@@ -937,19 +1030,29 @@ pub async fn create_role(
     Ok(Json(IdResponse { id }))
 }
 
+#[derive(Serialize)]
+pub struct RoleSummary {
+    #[serde(flatten)]
+    pub role: Role,
+    pub assigned_user_ids: Vec<Uuid>,
+}
+
 pub async fn list_roles(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(book_id): Path<Uuid>,
     Query(filter): Query<EntityFilter>,
-) -> Result<Json<Vec<Role>>, ApiError> {
+) -> Result<Json<Vec<RoleSummary>>, ApiError> {
     let (_, open_book) = book_context(&state, &headers, book_id).await?;
     let engine = open_book.engine.read().await;
     Ok(Json(
         engine
             .list_roles(filter.entity_id)
             .into_iter()
-            .cloned()
+            .map(|role| RoleSummary {
+                role: role.clone(),
+                assigned_user_ids: engine.users_for_role(role.role_id),
+            })
             .collect(),
     ))
 }
@@ -977,7 +1080,10 @@ pub async fn assign_workflow_to_role(
 #[derive(Deserialize)]
 pub struct AssignRoleToUserRequest {
     pub op_id: Uuid,
-    pub user_id: Uuid,
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+    #[serde(default)]
+    pub user_email: Option<String>,
 }
 
 pub async fn assign_role_to_user(
@@ -987,8 +1093,20 @@ pub async fn assign_role_to_user(
     Json(body): Json<AssignRoleToUserRequest>,
 ) -> Result<Json<IdResponse>, ApiError> {
     let (user, open_book) = book_context(&state, &headers, book_id).await?;
+    let target_user_id = match (body.user_id, body.user_email.as_deref()) {
+        (Some(user_id), None) => user_id,
+        (None, Some(email)) if email.trim().contains('@') => {
+            state.users.resolve_email(email).user_id
+        }
+        (None, Some(_)) => return Err(ApiError::invalid_input("user email is invalid")),
+        _ => {
+            return Err(ApiError::invalid_input(
+                "provide exactly one of user_id or user_email",
+            ))
+        }
+    };
     let id = mutate(&open_book, |engine| {
-        engine.assign_role_to_user(body.op_id, user.user_id, role_id, body.user_id)
+        engine.assign_role_to_user(body.op_id, user.user_id, role_id, target_user_id)
     })
     .await?;
     Ok(Json(IdResponse { id }))

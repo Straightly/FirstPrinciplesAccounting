@@ -24,6 +24,7 @@ fn app_over(books_dir: &std::path::Path) -> Router {
         books_dir: books_dir.to_string_lossy().into(),
         frontend_dist: "./nonexistent-dist".into(),
         dev_artifacts_dir: "./nonexistent-artifacts".into(),
+        generated_workflows_dir: "./nonexistent-generated-workflows".into(),
         ops_audit_log: std::env::temp_dir()
             .join(format!("lz_owner_test_{}.jsonl", Uuid::new_v4()))
             .to_string_lossy()
