@@ -1,12 +1,14 @@
 # LedgerZero (FirstPrincipleAccounting)
 
-A first-principles, AI-native accounting platform. Authoritative documents:
+A first-principles, AI-native accounting platform. Current public reference:
 
 - [`docs/FPA-Architecture-Diagram.md`](docs/FPA-Architecture-Diagram.md) — current runtime and deployment architecture
-- `docs/LedgerZero_Impl_Spec_v1.md` — implementation spec (build from this)
-- `docs/LedgerZero_Impl_Plan_v1.md` — milestone plan
-- `docs/LedgerZero_Theorems.md` — standing architectural guarantees every change must preserve
-- `docs/LedgerZero_Spec.md` — original vision/design document
+
+The `docs/LedgerZero_*` files are retained as historical design and delivery
+records. They are not the active project plan or specification and may contain
+superseded statements. Current behavior is established by the source and tests;
+the private control-plane project holds the single active specification and
+plan.
 
 ## Layout
 
