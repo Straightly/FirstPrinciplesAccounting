@@ -7,7 +7,15 @@ export async function api(path, options = {}) {
         ? { "Content-Type": "application/json", ...(options.headers || {}) }
         : options.headers,
     });
-    const body = await response.json().catch(() => ({}));
+    const responseText = await response.text();
+    let body = {};
+    if (responseText) {
+      try {
+        body = JSON.parse(responseText);
+      } catch {
+        body = { message: responseText };
+      }
+    }
     return { ok: response.ok, status: response.status, body };
   } catch (error) {
     return {

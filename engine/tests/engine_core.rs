@@ -221,6 +221,8 @@ fn lines_must_stay_within_one_chart_and_entity() {
                 name: "Alternative".into(),
                 description: None,
                 activate: false,
+                starter_template: ChartTemplate::Empty,
+                resource_type_id: None,
             },
         )
         .unwrap();

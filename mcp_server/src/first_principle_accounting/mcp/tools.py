@@ -239,6 +239,8 @@ async def create_chart(
     name: str,
     description: str | None = None,
     activate: bool = True,
+    starter_template: str = "EMPTY",
+    resource_type_id: str | None = None,
 ) -> dict[str, Any]:
     return await session.client.create_chart(
         uuid.UUID(book_id),
@@ -246,6 +248,10 @@ async def create_chart(
         name=name,
         description=description,
         activate=activate,
+        starter_template=starter_template,
+        resource_type_id=(
+            uuid.UUID(resource_type_id) if resource_type_id is not None else None
+        ),
     )
 
 

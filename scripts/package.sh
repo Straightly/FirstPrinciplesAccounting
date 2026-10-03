@@ -90,7 +90,7 @@ case "$(uname -s)" in
   *) echo "unsupported packaging platform: $(uname -s)" >&2; exit 1 ;;
 esac
 ENGINE_HASH=$(find "$ENGINE_ROOT/lib" -type f -exec shasum -a 256 {} \; | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')
-write_manifest "$ENGINE_ROOT" engine "$ENGINE_HASH" 'engine_api=2' 'storage_format=1' "rust_abi=$RUST_ABI"
+write_manifest "$ENGINE_ROOT" engine "$ENGINE_HASH" 'engine_api=3' 'storage_format=1' "rust_abi=$RUST_ABI"
 archive_component engine "$ENGINE_ROOT"
 
 BACKEND_ROOT="$OUTPUT_DIR/ledgerzero-backend-${VERSION}"
@@ -107,14 +107,14 @@ fi
 cp server.config.example.toml "$BACKEND_ROOT/"
 cp docs/LedgerZero_Run_and_Deploy.md "$BACKEND_ROOT/DEPLOY.md"
 BACKEND_HASH=$(shasum -a 256 "$BACKEND_ROOT/ledgerzero-backend" | awk '{print $1}')
-write_manifest "$BACKEND_ROOT" backend "$BACKEND_HASH" 'backend_api=3' 'backend_api_compat_min=1' 'requires_engine_api=2' 'requires_storage_format=1' "requires_rust_abi=$RUST_ABI"
+write_manifest "$BACKEND_ROOT" backend "$BACKEND_HASH" 'backend_api=4' 'backend_api_compat_min=1' 'requires_engine_api=3' 'requires_storage_format=1' "requires_rust_abi=$RUST_ABI"
 archive_component backend "$BACKEND_ROOT"
 
 LAUNCHER_ROOT="$OUTPUT_DIR/ledgerzero-launcher-${VERSION}"
 mkdir -p "$LAUNCHER_ROOT"
 cp -R frontend/dist "$LAUNCHER_ROOT/dist"
 LAUNCHER_HASH=$(find "$LAUNCHER_ROOT/dist" -type f -exec shasum -a 256 {} \; | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')
-write_manifest "$LAUNCHER_ROOT" launcher "$LAUNCHER_HASH" 'requires_backend_api=3'
+write_manifest "$LAUNCHER_ROOT" launcher "$LAUNCHER_HASH" 'requires_backend_api=4'
 archive_component launcher "$LAUNCHER_ROOT"
 
 RUNTIME_ROOT="$OUTPUT_DIR/ledgerzero-runtime-frontends-${VERSION}"
@@ -132,8 +132,8 @@ release_version=$VERSION
 source_revision=$REVISION
 source_state=$GIT_STATE
 platform=$PLATFORM
-engine_api=2
-backend_api=3
+engine_api=3
+backend_api=4
 storage_format=1
 runtime_frontend_api=1
 rust_abi=$RUST_ABI

@@ -96,6 +96,41 @@ async fn post(app: &Router, uri: &str, cookie: &str, body: Value) -> axum::respo
     call(app, Method::POST, uri, Some(cookie), Some(body)).await
 }
 
+#[tokio::test]
+async fn malformed_journal_entry_returns_a_structured_input_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_over(dir.path());
+    let response = call(
+        &app,
+        Method::POST,
+        &format!("/api/books/{}/entries", Uuid::new_v4()),
+        None,
+        Some(json!({
+            "entry_id": Uuid::new_v4(),
+            "entity_id": Uuid::new_v4(),
+            "entry_date": "2026-10-02",
+            "description": "bad amount type",
+            "source": "MANUAL",
+            "lines": [{
+                "line_id": Uuid::new_v4(),
+                "account_id": Uuid::new_v4(),
+                "debit_amount": 75,
+                "credit_amount": null,
+                "memo": null
+            }]
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(response).await;
+    assert_eq!(body["error_code"], "INVALID_INPUT");
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("journal entry request is invalid"));
+}
+
 /// Creates a book and returns `(book_id, entity_id)` — a book has exactly
 /// one entity, auto-created with the book (Impl Plan M7), so `entity_id`
 /// comes straight from the `create_book` response.
@@ -454,4 +489,149 @@ async fn copy_chart_over_http() {
     .await;
     assert_eq!(charts_resp.status(), StatusCode::OK);
     assert_eq!(body_json(charts_resp).await.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn corporate_starter_chart_is_atomic_idempotent_and_copy_safe_over_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_over(dir.path());
+    let cookie = dev_login(&app, OWNER).await;
+    let (book_id, entity_id) = create_book(&app, &cookie, "Starter Books").await;
+
+    let usd = body_json(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/resource-types"),
+            &cookie,
+            json!({
+                "op_id": Uuid::new_v4(), "name": "US Dollar", "kind": "CURRENCY",
+                "code": "USD", "unit_of_measure": "USD", "precision": 2
+            }),
+        )
+        .await,
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let inventory = body_json(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/resource-types"),
+            &cookie,
+            json!({
+                "op_id": Uuid::new_v4(), "name": "Widget", "kind": "INVENTORY",
+                "code": "WIDGET", "unit_of_measure": "each", "precision": 0
+            }),
+        )
+        .await,
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let op_id = Uuid::new_v4();
+    let request = json!({
+        "op_id": op_id,
+        "entity_id": entity_id,
+        "name": "Primary",
+        "description": "Corporate starter",
+        "activate": true,
+        "starter_template": "CORPORATE",
+        "resource_type_id": usd,
+    });
+    let first = post(
+        &app,
+        &format!("/api/books/{book_id}/charts"),
+        &cookie,
+        request.clone(),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let chart_id = body_json(first).await["id"].as_str().unwrap().to_string();
+
+    let replay = post(
+        &app,
+        &format!("/api/books/{book_id}/charts"),
+        &cookie,
+        request,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(body_json(replay).await["id"], chart_id);
+
+    let accounts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/accounts?chart_id={chart_id}"),
+            &cookie,
+        )
+        .await,
+    )
+    .await;
+    let accounts = accounts.as_array().unwrap();
+    assert_eq!(accounts.len(), 13);
+    let names: std::collections::BTreeMap<_, _> = accounts
+        .iter()
+        .map(|account| (account["name"].as_str().unwrap(), account))
+        .collect();
+    assert_eq!(names["Checking Account"]["account_type"], "ASSET");
+    assert_eq!(names["Common Stock"]["account_type"], "EQUITY");
+    assert_eq!(names["Sales or Service Revenue"]["account_type"], "REVENUE");
+    assert_eq!(names["Operating Expenses"]["account_type"], "EXPENSE");
+    assert!(accounts
+        .iter()
+        .all(|account| account["resource_type_id"] == usd));
+    assert_eq!(
+        names["Checking Account"]["parent_account_id"],
+        names["Cash"]["account_id"]
+    );
+
+    let rejected = post(
+        &app,
+        &format!("/api/books/{book_id}/charts"),
+        &cookie,
+        json!({
+            "op_id": Uuid::new_v4(), "entity_id": entity_id,
+            "name": "Invalid inventory", "description": null, "activate": false,
+            "starter_template": "CORPORATE", "resource_type_id": inventory
+        }),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let charts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/charts?entity_id={entity_id}"),
+            &cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(charts.as_array().unwrap().len(), 1, "failure is atomic");
+
+    let copy = post(
+        &app,
+        &format!("/api/books/{book_id}/charts/{chart_id}/copy"),
+        &cookie,
+        json!({
+            "op_id": Uuid::new_v4(), "name": "Primary copy",
+            "description": null, "activate": false
+        }),
+    )
+    .await;
+    assert_eq!(copy.status(), StatusCode::OK);
+    let copy_id = body_json(copy).await["id"].as_str().unwrap().to_string();
+    let copied_accounts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/accounts?chart_id={copy_id}"),
+            &cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(copied_accounts.as_array().unwrap().len(), 13);
 }

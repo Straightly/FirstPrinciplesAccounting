@@ -183,15 +183,25 @@ class TestAdminPrimitives(unittest.TestCase):
     def test_create_chart_converts_string_ids_to_uuid(self):
         book_id = str(uuid.uuid4())
         entity_id = str(uuid.uuid4())
+        resource_type_id = str(uuid.uuid4())
         asyncio.run(
             tools.create_chart(
-                self.session, book_id=book_id, entity_id=entity_id, name="Main"
+                self.session,
+                book_id=book_id,
+                entity_id=entity_id,
+                name="Main",
+                starter_template="CORPORATE",
+                resource_type_id=resource_type_id,
             )
         )
         [call] = self.client.calls
         _, args, kwargs = call
         self.assertEqual(args, (uuid.UUID(book_id),))
         self.assertEqual(kwargs["entity_id"], uuid.UUID(entity_id))
+        self.assertEqual(kwargs["starter_template"], "CORPORATE")
+        self.assertEqual(
+            kwargs["resource_type_id"], uuid.UUID(resource_type_id)
+        )
 
     def test_assign_role_to_user_converts_all_three_ids(self):
         book_id, role_id, user_id = (str(uuid.uuid4()) for _ in range(3))

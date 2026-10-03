@@ -30,6 +30,14 @@ pub struct NewResourceType {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChartTemplate {
+    #[default]
+    Empty,
+    Corporate,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewChart {
     pub entity_id: Uuid,
@@ -38,6 +46,14 @@ pub struct NewChart {
     /// Make this the entity's active chart. The entity's first chart is
     /// always activated regardless (exactly-one-active, Impl Spec §2.2).
     pub activate: bool,
+    /// Existing callers deserialize to `EMPTY`; `CORPORATE` atomically seeds
+    /// the approved starter hierarchy.
+    #[serde(default)]
+    pub starter_template: ChartTemplate,
+    /// Required only for `CORPORATE`; all seeded accounts measure this
+    /// existing currency resource.
+    #[serde(default)]
+    pub resource_type_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -647,6 +663,34 @@ impl AccountingEngine {
                 spec.name
             )));
         }
+        let starter_resource_id = match spec.starter_template {
+            ChartTemplate::Empty => {
+                if spec.resource_type_id.is_some() {
+                    return Err(EngineError::invalid_input(
+                        "resource_type_id is only valid with the CORPORATE starter template",
+                    ));
+                }
+                None
+            }
+            ChartTemplate::Corporate => {
+                let resource_type_id = spec.resource_type_id.ok_or_else(|| {
+                    EngineError::invalid_input(
+                        "resource_type_id is required for the CORPORATE starter template",
+                    )
+                })?;
+                let resource = self
+                    .state
+                    .resource_types
+                    .get(&resource_type_id)
+                    .ok_or_else(|| EngineError::invalid_input("unknown resource type"))?;
+                if resource.kind != ResourceKind::Currency {
+                    return Err(EngineError::invalid_input(
+                        "the CORPORATE starter template requires a CURRENCY resource type",
+                    ));
+                }
+                Some(resource_type_id)
+            }
+        };
         let current_active = self
             .state
             .charts
@@ -656,15 +700,16 @@ impl AccountingEngine {
         // The entity's first chart is always active (exactly-one-active rule).
         let is_active = spec.activate || current_active.is_none();
         let deactivated_chart_id = if spec.activate { current_active } else { None };
+        let chart_id = Uuid::new_v4();
         let chart = Chart {
-            chart_id: Uuid::new_v4(),
+            chart_id,
             entity_id: spec.entity_id,
             name: spec.name,
             description: spec.description,
             is_active,
             created_at: self.clock.now_ms(),
         };
-        Ok(self.record(
+        self.record(
             op_id,
             actor,
             request,
@@ -672,7 +717,60 @@ impl AccountingEngine {
                 chart,
                 deactivated_chart_id,
             },
-        ))
+        );
+
+        if let Some(resource_type_id) = starter_resource_id {
+            // Parents precede children, so each reference points to an account
+            // created in this same chart. All validation completes before the
+            // chart event above is recorded.
+            let definitions = [
+                ("Assets", AccountType::Asset, None),
+                ("Current Assets", AccountType::Asset, Some(0)),
+                ("Cash", AccountType::Asset, Some(1)),
+                ("Checking Account", AccountType::Asset, Some(2)),
+                ("Liabilities", AccountType::Liability, None),
+                ("Equity", AccountType::Equity, None),
+                ("Common Stock", AccountType::Equity, Some(5)),
+                ("Retained Earnings", AccountType::Equity, Some(5)),
+                ("Additional Paid-in Capital", AccountType::Equity, Some(5)),
+                ("Revenue", AccountType::Revenue, None),
+                ("Sales or Service Revenue", AccountType::Revenue, Some(9)),
+                ("Expenses", AccountType::Expense, None),
+                ("Operating Expenses", AccountType::Expense, Some(11)),
+            ];
+            let account_ids: Vec<Uuid> = definitions.iter().map(|_| Uuid::new_v4()).collect();
+            for (index, (name, account_type, parent_index)) in definitions.into_iter().enumerate() {
+                let account = Account {
+                    account_id: account_ids[index],
+                    chart_id,
+                    entity_id: spec.entity_id,
+                    name: name.to_string(),
+                    code: None,
+                    account_type,
+                    normal_balance: account_type.normal_balance(),
+                    resource_type_id,
+                    parent_account_id: parent_index.map(|parent| account_ids[parent]),
+                    is_active: true,
+                    validation_rules: Value::Null,
+                    created_at: self.clock.now_ms(),
+                    metadata: Value::Null,
+                };
+                let sub_request = json!({
+                    "op": "create_chart_starter_account",
+                    "chart_id": chart_id,
+                    "account_id": account.account_id,
+                    "starter_template": "CORPORATE"
+                });
+                self.record(
+                    Uuid::new_v4(),
+                    actor,
+                    sub_request,
+                    EventPayload::AccountCreated { account },
+                );
+            }
+        }
+
+        Ok(chart_id)
     }
 
     /// Duplicates a chart's accounts under a new chart in the same entity

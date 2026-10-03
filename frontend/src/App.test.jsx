@@ -134,6 +134,107 @@ describe("FPA application shell", () => {
     expect(postedBodies[1].lines[1].line_id).not.toBe(postedBodies[0].lines[1].line_id);
   });
 
+  it("shows a rejected journal entry beside the form and restores its submit button", async () => {
+    const chartId = "55555555-5555-4555-8555-555555555555";
+    const cashId = "66666666-6666-4666-8666-666666666666";
+    const expenseId = "77777777-7777-4777-8777-777777777777";
+    const accounts = [
+      { account_id: cashId, chart_id: chartId, name: "Cash", account_type: "ASSET", resource_type_id: "usd", is_active: true },
+      { account_id: expenseId, chart_id: chartId, name: "Expense", account_type: "EXPENSE", resource_type_id: "usd", is_active: true },
+    ];
+    const fetchMock = vi.fn((path, options = {}) => {
+      const value = String(path);
+      if (value === "/api/auth/config") return response({ providers: [], dev_login_enabled: true });
+      if (value === "/api/auth/me") return response({ user: { user_id: "owner-id", email: "owner@example.com", display_name: "Owner" }, is_bootstrap_owner: true, allowed_actions: [] });
+      if (value === "/api/books/mine") return response([book]);
+      if (value.includes("/workflows/mine")) return response([]);
+      if (value.endsWith("/entities")) return response([{ entity_id: book.entity_id, name: "Test Book" }]);
+      if (value.endsWith("/resource-types")) return response([{ resource_type_id: "usd", name: "US Dollar", code: "USD", kind: "CURRENCY", unit_of_measure: "USD", precision: 2 }]);
+      if (value.includes("/charts?")) return response([{ chart_id: chartId, name: "Primary", is_active: true }]);
+      if (value.includes("/accounts?")) return response(accounts);
+      if (value.includes("/accounts/") && value.endsWith("/balance")) return response({ debit_total: "0", credit_total: "0", natural: "0" });
+      if (value.endsWith("/entries") && options.method === "POST") return Promise.resolve(new Response("Failed to deserialize journal entry field", { status: 422 }));
+      if (value.includes("/entries?") || value.includes("/periods?") || value.endsWith("/prices") || value.endsWith("/audit-log") || value.includes("/workflows?") || value.includes("/roles?") || value.endsWith("/workflow-artifacts") || value.endsWith("/users")) return response([]);
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /Test Book/ }));
+    await user.click(await screen.findByRole("button", { name: "Ledger" }));
+    const entryForm = within(screen.getByRole("heading", { name: "Post balanced entry" }).closest("form"));
+    await user.type(entryForm.getByLabelText("Description"), "Filing fee");
+    await user.type(entryForm.getByLabelText("Amount"), "75.00");
+    await user.selectOptions(entryForm.getByLabelText("Debit account"), expenseId);
+    await user.selectOptions(entryForm.getByLabelText("Credit account"), cashId);
+    await user.click(entryForm.getByRole("button", { name: "Post entry" }));
+
+    expect((await entryForm.findByRole("alert")).textContent).toContain("Failed to deserialize journal entry field");
+    expect(entryForm.getByRole("button", { name: "Post entry" }).disabled).toBe(false);
+  });
+
+  it("creates a corporate starter chart with an explicitly selected currency", async () => {
+    const postedBodies = [];
+    let created = false;
+    const usdId = "88888888-8888-4888-8888-888888888888";
+    const inventoryId = "99999999-9999-4999-8999-999999999999";
+    const chartId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const assetsId = "10000000-0000-4000-8000-000000000001";
+    const currentAssetsId = "10000000-0000-4000-8000-000000000002";
+    const cashId = "10000000-0000-4000-8000-000000000003";
+    const checkingId = "10000000-0000-4000-8000-000000000004";
+    const starterAccounts = [
+      { account_id: checkingId, chart_id: chartId, name: "Checking Account", code: null, account_type: "ASSET", resource_type_id: usdId, parent_account_id: cashId, is_active: true },
+      { account_id: assetsId, chart_id: chartId, name: "Assets", code: null, account_type: "ASSET", resource_type_id: usdId, parent_account_id: null, is_active: true },
+      { account_id: cashId, chart_id: chartId, name: "Cash", code: null, account_type: "ASSET", resource_type_id: usdId, parent_account_id: currentAssetsId, is_active: true },
+      { account_id: currentAssetsId, chart_id: chartId, name: "Current Assets", code: null, account_type: "ASSET", resource_type_id: usdId, parent_account_id: assetsId, is_active: true },
+    ];
+    const fetchMock = vi.fn((path, options = {}) => {
+      const value = String(path);
+      if (value === "/api/auth/config") return response({ providers: [], dev_login_enabled: true });
+      if (value === "/api/auth/me") return response({ user: { user_id: "owner-id", email: "owner@example.com", display_name: "Owner" }, is_bootstrap_owner: true, allowed_actions: [] });
+      if (value === "/api/books/mine") return response([book]);
+      if (value.includes("/workflows/mine")) return response([]);
+      if (value.endsWith("/entities")) return response([{ entity_id: book.entity_id, name: "Test Book" }]);
+      if (value.endsWith("/resource-types")) return response([
+        { resource_type_id: usdId, name: "US Dollar", code: "USD", kind: "CURRENCY", unit_of_measure: "USD", precision: 2 },
+        { resource_type_id: inventoryId, name: "Widget", code: "WIDGET", kind: "INVENTORY", unit_of_measure: "each", precision: 0 },
+      ]);
+      if (value.endsWith("/charts") && options.method === "POST") {
+        postedBodies.push(JSON.parse(options.body));
+        created = true;
+        return response({ id: chartId });
+      }
+      if (value.includes("/charts?")) return response(created ? [{ chart_id: chartId, name: "Primary chart", description: null, is_active: true }] : []);
+      if (value.includes("/accounts?")) return response(created ? starterAccounts : []);
+      if (value.includes("/accounts/") && value.endsWith("/balance")) return response({ debit_total: "0", credit_total: "0", natural: "0" });
+      if (value.includes("/periods?") || value.endsWith("/prices") || value.includes("/entries?") || value.endsWith("/audit-log") || value.includes("/workflows?") || value.includes("/roles?") || value.endsWith("/workflow-artifacts") || value.endsWith("/users")) return response([]);
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /Test Book/ }));
+    await user.click(await screen.findByRole("button", { name: "Setup" }));
+
+    expect((await screen.findByLabelText("Chart setup")).value).toBe("CORPORATE");
+    const currency = screen.getByLabelText("Starter currency");
+    await waitFor(() => expect(currency.value).toBe(usdId));
+    expect(within(currency).queryByRole("option", { name: /Widget/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Create chart" }));
+
+    await waitFor(() => expect(postedBodies).toHaveLength(1));
+    expect(postedBodies[0]).toMatchObject({
+      entity_id: book.entity_id,
+      name: "Primary chart",
+      starter_template: "CORPORATE",
+      resource_type_id: usdId,
+    });
+    const accountTable = (await screen.findByRole("columnheader", { name: "Account hierarchy" })).closest("table");
+    const checking = within(accountTable).getByText(/Checking Account/, { selector: "span" });
+    expect(checking.style.paddingLeft).toBe("3.75rem");
+  });
+
   it("requires a blank current-book passphrase when the owner initiates transfer", async () => {
     const fetchMock = vi.fn((path) => {
       const value = String(path);

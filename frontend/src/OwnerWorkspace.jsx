@@ -36,13 +36,15 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
   const [backupLocation, setBackupLocation] = useState("");
   const [restoreLocation, setRestoreLocation] = useState("");
   const [resource, setResource] = useState({ name: "US Dollar", kind: "CURRENCY", code: "USD", unit_of_measure: "USD", precision: "2" });
-  const [chart, setChart] = useState({ name: "Primary chart", description: "", activate: true });
+  const [chart, setChart] = useState({ name: "Primary chart", description: "", activate: true, starter_template: "CORPORATE", resource_type_id: "" });
   const [copyChart, setCopyChart] = useState({ source: "", name: "", description: "", activate: false });
   const [account, setAccount] = useState({ chart_id: "", name: "", code: "", account_type: "ASSET", resource_type_id: "", parent_account_id: "" });
   const [accountEdit, setAccountEdit] = useState({ account_id: "", name: "", code: "" });
   const [period, setPeriod] = useState({ name: "", start_date: today(), end_date: today() });
   const [price, setPrice] = useState({ base_resource_type_id: "", quote_resource_type_id: "", rate: "", as_of: today() });
   const [entry, setEntry] = useState(() => newEntryDraft());
+  const [entryError, setEntryError] = useState("");
+  const [entryPosting, setEntryPosting] = useState(false);
   const [reverse, setReverse] = useState({ original_entry_id: "", entry_date: today(), description: "" });
   const [workflowArtifact, setWorkflowArtifact] = useState({ workflow_name: "", description: "" });
   const [role, setRole] = useState({ name: "", description: "" });
@@ -87,7 +89,9 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
   useEffect(() => { loadData(); }, [loadData, refreshEpoch]);
   useEffect(() => {
     const active = data.charts.find((item) => item.is_active) || data.charts[0];
+    const currency = data.resourceTypes.find((item) => item.kind === "CURRENCY");
     setAccount((current) => ({ ...current, chart_id: current.chart_id || active?.chart_id || "", resource_type_id: current.resource_type_id || data.resourceTypes[0]?.resource_type_id || "" }));
+    setChart((current) => ({ ...current, resource_type_id: current.resource_type_id || currency?.resource_type_id || "" }));
     setCopyChart((current) => ({ ...current, source: current.source || active?.chart_id || "" }));
     setPrice((current) => ({ ...current, base_resource_type_id: current.base_resource_type_id || data.resourceTypes[0]?.resource_type_id || "", quote_resource_type_id: current.quote_resource_type_id || data.resourceTypes[1]?.resource_type_id || "" }));
   }, [data.charts, data.resourceTypes]);
@@ -96,6 +100,40 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
     const value = await request(path, { method, body: JSON.stringify(body) }, success);
     if (value !== null) { await loadData(); await onChanged("change"); }
     return value;
+  }
+
+  async function postEntry(event) {
+    event.preventDefault();
+    setEntryError("");
+    setError("");
+    setEntryPosting(true);
+    const result = await api(`/api/books/${book.book_id}/entries`, {
+      method: "POST",
+      body: JSON.stringify({
+        entry_id: entry.entry_id,
+        entity_id: book.entity_id,
+        entry_date: entry.entry_date,
+        description: entry.description,
+        source: "MANUAL",
+        metadata: {},
+        prices: [],
+        lines: [
+          { line_id: entry.debit_line_id, account_id: entry.debit_account, debit_amount: entry.amount, credit_amount: null, memo: entry.memo || null, metadata: {} },
+          { line_id: entry.credit_line_id, account_id: entry.credit_account, debit_amount: null, credit_amount: entry.amount, memo: entry.memo || null, metadata: {} },
+        ],
+      }),
+    });
+    setEntryPosting(false);
+    if (!result.ok) {
+      const message = errorText(result);
+      setEntryError(message);
+      setError(message);
+      return;
+    }
+    setMessage(`Entry ${entry.entry_id} posted.`);
+    setEntry(newEntryDraft(entry));
+    await loadData();
+    await onChanged("change");
   }
 
   async function createBookSubmit(event) {
@@ -114,7 +152,25 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
     if (value) await onChanged("change");
   }
 
-  const activeChart = data.charts.find((item) => item.is_active);
+  const accountTree = useMemo(() => {
+    const byParent = new Map();
+    for (const item of data.accounts) {
+      const key = item.parent_account_id || "";
+      byParent.set(key, [...(byParent.get(key) || []), item]);
+    }
+    for (const children of byParent.values()) {
+      children.sort((left, right) => (left.code || left.name).localeCompare(right.code || right.name));
+    }
+    const ordered = [];
+    const append = (parentId, depth) => {
+      for (const item of byParent.get(parentId) || []) {
+        ordered.push({ ...item, depth });
+        append(item.account_id, depth + 1);
+      }
+    };
+    append("", 0);
+    return ordered;
+  }, [data.accounts]);
   const accountName = (id) => data.accounts.find((item) => item.account_id === id)?.name || id;
   const userName = (id) => data.users.find((item) => item.user_id === id)?.email || id;
 
@@ -165,10 +221,10 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
             <form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/resource-types`, { op_id: newId(), ...resource, precision: Number(resource.precision), metadata: {} }, "Resource type created."); if (value) setResource({ name: "", kind: "CURRENCY", code: "", unit_of_measure: "", precision: "2" }); }}><h3>Create resource type</h3><div className="grid"><Field label="Name"><input required value={resource.name} onChange={(event) => setResource({ ...resource, name: event.target.value })} /></Field><Field label="Kind"><select value={resource.kind} onChange={(event) => setResource({ ...resource, kind: event.target.value })}>{["CURRENCY", "INVENTORY", "COMMODITY", "DIGITAL_ASSET", "OTHER"].map((value) => <option key={value}>{value}</option>)}</select></Field><Field label="Code"><input required value={resource.code} onChange={(event) => setResource({ ...resource, code: event.target.value })} /></Field><Field label="Unit"><input required value={resource.unit_of_measure} onChange={(event) => setResource({ ...resource, unit_of_measure: event.target.value })} /></Field><Field label="Precision"><input type="number" min="0" max="18" required value={resource.precision} onChange={(event) => setResource({ ...resource, precision: event.target.value })} /></Field></div><Button type="submit">Create resource type</Button></form>
           </Panel>
           <Panel title="Charts"><div className="table-wrap"><table><thead><tr><th>Name</th><th>Description</th><th>Status</th></tr></thead><tbody>{data.charts.map((item) => <tr key={item.chart_id}><td>{item.name}</td><td>{item.description}</td><td>{item.is_active ? "Active" : "Inactive"}</td></tr>)}</tbody></table></div>
-            <div className="grid"><form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/charts`, { op_id: newId(), entity_id: book.entity_id, name: chart.name, description: chart.description || null, activate: chart.activate }, "Chart created."); if (value) setChart({ name: "", description: "", activate: false }); }}><h3>Create chart</h3><Field label="Name"><input required value={chart.name} onChange={(event) => setChart({ ...chart, name: event.target.value })} /></Field><Field label="Description"><input value={chart.description} onChange={(event) => setChart({ ...chart, description: event.target.value })} /></Field><label><input type="checkbox" checked={chart.activate} onChange={(event) => setChart({ ...chart, activate: event.target.checked })} /> Make active</label><br /><Button type="submit">Create chart</Button></form>
+            <div className="grid"><form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/charts`, { op_id: newId(), entity_id: book.entity_id, name: chart.name, description: chart.description || null, activate: chart.activate, starter_template: chart.starter_template, resource_type_id: chart.starter_template === "CORPORATE" ? chart.resource_type_id : null }, chart.starter_template === "CORPORATE" ? "Corporate starter chart created." : "Empty chart created."); if (value) setChart({ ...chart, name: "", description: "", activate: false }); }}><h3>Create chart</h3><Field label="Name"><input required value={chart.name} onChange={(event) => setChart({ ...chart, name: event.target.value })} /></Field><Field label="Description"><input value={chart.description} onChange={(event) => setChart({ ...chart, description: event.target.value })} /></Field><Field label="Chart setup"><select value={chart.starter_template} onChange={(event) => setChart({ ...chart, starter_template: event.target.value })}><option value="CORPORATE">Corporate starter</option><option value="EMPTY">Empty chart</option></select></Field>{chart.starter_template === "CORPORATE" && <><Field label="Starter currency"><select required value={chart.resource_type_id} onChange={(event) => setChart({ ...chart, resource_type_id: event.target.value })}><option value="">Choose a currency…</option>{data.resourceTypes.filter((item) => item.kind === "CURRENCY").map((item) => <option key={item.resource_type_id} value={item.resource_type_id}>{item.code} — {item.name}</option>)}</select></Field><p className="muted">Creates Assets, Liabilities, Equity, Revenue, and Expenses with the approved starter hierarchy. Add specialized accounts when needed.</p></>}<label><input type="checkbox" checked={chart.activate} onChange={(event) => setChart({ ...chart, activate: event.target.checked })} /> Make active</label><br /><Button type="submit">Create chart</Button></form>
             <form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/charts/${copyChart.source}/copy`, { op_id: newId(), name: copyChart.name, description: copyChart.description || null, activate: copyChart.activate }, "Chart copied."); if (value) setCopyChart({ ...copyChart, name: "", description: "" }); }}><h3>Copy chart</h3><Field label="Source"><select required value={copyChart.source} onChange={(event) => setCopyChart({ ...copyChart, source: event.target.value })}>{data.charts.map((item) => <option key={item.chart_id} value={item.chart_id}>{item.name}</option>)}</select></Field><Field label="New name"><input required value={copyChart.name} onChange={(event) => setCopyChart({ ...copyChart, name: event.target.value })} /></Field><Field label="Description"><input value={copyChart.description} onChange={(event) => setCopyChart({ ...copyChart, description: event.target.value })} /></Field><label><input type="checkbox" checked={copyChart.activate} onChange={(event) => setCopyChart({ ...copyChart, activate: event.target.checked })} /> Make active</label><br /><Button type="submit">Copy chart</Button></form></div>
           </Panel>
-          <Panel title="Accounts"><div className="table-wrap"><table><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Resource</th><th>Balance</th><th>Status</th><th></th></tr></thead><tbody>{data.accounts.map((item) => <tr key={item.account_id}><td>{item.code}</td><td>{item.name}</td><td>{item.account_type}</td><td>{data.resourceTypes.find((type) => type.resource_type_id === item.resource_type_id)?.code}</td><td>{data.balances[item.account_id]?.natural ?? "0"}</td><td>{item.is_active ? "Active" : "Inactive"}</td><td><Button kind="secondary" onClick={() => changed(`/api/books/${book.book_id}/accounts/${item.account_id}/active`, { op_id: newId(), is_active: !item.is_active }, `Account ${item.is_active ? "deactivated" : "reactivated"}.`, "PUT")}>{item.is_active ? "Deactivate" : "Reactivate"}</Button></td></tr>)}</tbody></table></div>
+          <Panel title="Accounts"><div className="table-wrap"><table><thead><tr><th>Code</th><th>Account hierarchy</th><th>Type</th><th>Resource</th><th>Balance</th><th>Status</th><th></th></tr></thead><tbody>{accountTree.map((item) => <tr key={item.account_id}><td>{item.code}</td><td><span style={{ paddingLeft: `${item.depth * 1.25}rem` }}>{item.depth > 0 ? "↳ " : ""}{item.name}</span></td><td>{item.account_type}</td><td>{data.resourceTypes.find((type) => type.resource_type_id === item.resource_type_id)?.code}</td><td>{data.balances[item.account_id]?.natural ?? "0"}</td><td>{item.is_active ? "Active" : "Inactive"}</td><td><Button kind="secondary" onClick={() => changed(`/api/books/${book.book_id}/accounts/${item.account_id}/active`, { op_id: newId(), is_active: !item.is_active }, `Account ${item.is_active ? "deactivated" : "reactivated"}.`, "PUT")}>{item.is_active ? "Deactivate" : "Reactivate"}</Button></td></tr>)}</tbody></table></div>
             <div className="grid"><form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/accounts`, { op_id: newId(), chart_id: account.chart_id, name: account.name, code: account.code || null, account_type: account.account_type, resource_type_id: account.resource_type_id, parent_account_id: account.parent_account_id || null, validation_rules: {}, metadata: {} }, "Account created."); if (value) setAccount({ ...account, name: "", code: "", parent_account_id: "" }); }}><h3>Create account</h3><Field label="Chart"><select required value={account.chart_id} onChange={(event) => setAccount({ ...account, chart_id: event.target.value })}>{data.charts.map((item) => <option key={item.chart_id} value={item.chart_id}>{item.name}</option>)}</select></Field><Field label="Name"><input required value={account.name} onChange={(event) => setAccount({ ...account, name: event.target.value })} /></Field><Field label="Code"><input value={account.code} onChange={(event) => setAccount({ ...account, code: event.target.value })} /></Field><Field label="Type"><select value={account.account_type} onChange={(event) => setAccount({ ...account, account_type: event.target.value })}>{["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE"].map((value) => <option key={value}>{value}</option>)}</select></Field><Field label="Resource"><select required value={account.resource_type_id} onChange={(event) => setAccount({ ...account, resource_type_id: event.target.value })}>{data.resourceTypes.map((item) => <option key={item.resource_type_id} value={item.resource_type_id}>{item.code} — {item.name}</option>)}</select></Field><Field label="Parent account (optional)"><select value={account.parent_account_id} onChange={(event) => setAccount({ ...account, parent_account_id: event.target.value })}><option value="">None</option>{data.accounts.filter((item) => item.chart_id === account.chart_id).map((item) => <option key={item.account_id} value={item.account_id}>{item.name}</option>)}</select></Field><Button type="submit">Create account</Button></form>
             <form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/accounts/${accountEdit.account_id}`, { op_id: newId(), name: accountEdit.name || null, code: accountEdit.code || null, metadata: null }, "Account metadata updated.", "PATCH"); if (value) setAccountEdit({ account_id: "", name: "", code: "" }); }}><h3>Update account</h3><Field label="Account"><select required value={accountEdit.account_id} onChange={(event) => { const selected = data.accounts.find((item) => item.account_id === event.target.value); setAccountEdit({ account_id: event.target.value, name: selected?.name || "", code: selected?.code || "" }); }}><option value="">Choose…</option>{data.accounts.map((item) => <option key={item.account_id} value={item.account_id}>{item.name}</option>)}</select></Field><Field label="Name"><input required value={accountEdit.name} onChange={(event) => setAccountEdit({ ...accountEdit, name: event.target.value })} /></Field><Field label="Code"><input value={accountEdit.code} onChange={(event) => setAccountEdit({ ...accountEdit, code: event.target.value })} /></Field><Button type="submit">Update account</Button></form></div>
           </Panel>
@@ -180,7 +236,7 @@ export default function OwnerWorkspace({ me, book, isBookOwner, refreshEpoch, on
 
       {tab === "ledger" && <Panel title="Journal entries and balances">
         {!book.is_open ? <p className="warning">Open the book before using the ledger.</p> : <>
-          <form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/entries`, { entry_id: entry.entry_id, entity_id: book.entity_id, entry_date: entry.entry_date, description: entry.description, source: "MANUAL", metadata: {}, prices: [], lines: [{ line_id: entry.debit_line_id, account_id: entry.debit_account, debit_amount: entry.amount, credit_amount: null, memo: entry.memo || null, metadata: {} }, { line_id: entry.credit_line_id, account_id: entry.credit_account, debit_amount: null, credit_amount: entry.amount, memo: entry.memo || null, metadata: {} }] }, `Entry ${entry.entry_id} posted.`); if (value) setEntry(newEntryDraft(entry)); }}><h3>Post balanced entry</h3><div className="grid"><Field label="Entry date"><input type="date" required value={entry.entry_date} onChange={(event) => setEntry({ ...entry, entry_date: event.target.value })} /></Field><Field label="Description"><input required value={entry.description} onChange={(event) => setEntry({ ...entry, description: event.target.value })} /></Field><Field label="Amount"><input required inputMode="decimal" value={entry.amount} onChange={(event) => setEntry({ ...entry, amount: event.target.value })} /></Field><Field label="Debit account"><select required value={entry.debit_account} onChange={(event) => setEntry({ ...entry, debit_account: event.target.value })}><option value="">Choose…</option>{data.accounts.filter((item) => item.is_active).map((item) => <option key={item.account_id} value={item.account_id}>{item.name}</option>)}</select></Field><Field label="Credit account"><select required value={entry.credit_account} onChange={(event) => setEntry({ ...entry, credit_account: event.target.value })}><option value="">Choose…</option>{data.accounts.filter((item) => item.is_active).map((item) => <option key={item.account_id} value={item.account_id}>{item.name}</option>)}</select></Field><Field label="Memo"><input value={entry.memo} onChange={(event) => setEntry({ ...entry, memo: event.target.value })} /></Field></div><Button type="submit">Post entry</Button></form>
+          <form onSubmit={postEntry}><h3>Post balanced entry</h3><div className="grid"><Field label="Entry date"><input type="date" required value={entry.entry_date} onChange={(event) => setEntry({ ...entry, entry_date: event.target.value })} /></Field><Field label="Description"><input required value={entry.description} onChange={(event) => setEntry({ ...entry, description: event.target.value })} /></Field><Field label="Amount"><input required inputMode="decimal" value={entry.amount} onChange={(event) => setEntry({ ...entry, amount: event.target.value })} /></Field><Field label="Debit account"><select required value={entry.debit_account} onChange={(event) => setEntry({ ...entry, debit_account: event.target.value })}><option value="">Choose…</option>{data.accounts.filter((item) => item.is_active).map((item) => <option key={item.account_id} value={item.account_id}>{item.name}</option>)}</select></Field><Field label="Credit account"><select required value={entry.credit_account} onChange={(event) => setEntry({ ...entry, credit_account: event.target.value })}><option value="">Choose…</option>{data.accounts.filter((item) => item.is_active).map((item) => <option key={item.account_id} value={item.account_id}>{item.name}</option>)}</select></Field><Field label="Memo"><input value={entry.memo} onChange={(event) => setEntry({ ...entry, memo: event.target.value })} /></Field></div>{entryError && <p className="error" role="alert">{entryError}</p>}<Button type="submit" disabled={entryPosting}>{entryPosting ? "Posting…" : "Post entry"}</Button></form>
           <form onSubmit={async (event) => { event.preventDefault(); const value = await changed(`/api/books/${book.book_id}/entries/reverse`, { new_entry_id: newId(), original_entry_id: reverse.original_entry_id, entry_date: reverse.entry_date, description: reverse.description || null, metadata: {} }, "Reversal posted."); if (value) setReverse({ original_entry_id: "", entry_date: today(), description: "" }); }}><h3>Reverse entry</h3><div className="grid"><Field label="Original entry"><select required value={reverse.original_entry_id} onChange={(event) => setReverse({ ...reverse, original_entry_id: event.target.value })}><option value="">Choose…</option>{data.entries.map((item) => <option key={item.entry_id} value={item.entry_id}>{item.entry_date} — {item.description}</option>)}</select></Field><Field label="Reversal date"><input type="date" required value={reverse.entry_date} onChange={(event) => setReverse({ ...reverse, entry_date: event.target.value })} /></Field><Field label="Description"><input value={reverse.description} onChange={(event) => setReverse({ ...reverse, description: event.target.value })} /></Field></div><Button type="submit">Post reversal</Button></form>
           <div className="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th>Source</th><th>Lines</th><th>ID</th></tr></thead><tbody>{data.entries.map((item) => <tr key={item.entry_id}><td>{item.entry_date}</td><td>{item.description}</td><td>{item.source}</td><td>{item.lines.map((line) => `${accountName(line.account_id)}: ${line.debit_amount ? `Dr ${line.debit_amount}` : `Cr ${line.credit_amount}`}`).join("; ")}</td><td><code>{item.entry_id}</code></td></tr>)}</tbody></table></div>
           <h3>Account balances</h3><div className="table-wrap"><table><thead><tr><th>Account</th><th>Debits</th><th>Credits</th><th>Natural balance</th></tr></thead><tbody>{data.accounts.map((item) => <tr key={item.account_id}><td>{item.name}</td><td>{data.balances[item.account_id]?.debit_total ?? "0"}</td><td>{data.balances[item.account_id]?.credit_total ?? "0"}</td><td>{data.balances[item.account_id]?.natural ?? "0"}</td></tr>)}</tbody></table></div>

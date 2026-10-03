@@ -9,6 +9,7 @@ use crate::books::{mutate, BookMeta, OpenBook};
 use crate::error::ApiError;
 use crate::state::SharedState;
 use crate::users::User;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
@@ -854,8 +855,14 @@ pub async fn post_entry(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(book_id): Path<Uuid>,
-    Json(body): Json<NewEntry>,
+    payload: Result<Json<NewEntry>, JsonRejection>,
 ) -> Result<Json<IdResponse>, ApiError> {
+    let Json(body) = payload.map_err(|error| {
+        ApiError::invalid_input(format!(
+            "journal entry request is invalid: {}",
+            error.body_text()
+        ))
+    })?;
     let (user, open_book) = if body.workflow.is_some() {
         open_book_for_any_user(&state, &headers, book_id).await?
     } else {

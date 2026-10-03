@@ -4,6 +4,7 @@ book files directly; MCP calls runtime backend APIs for runtime facts").
 """
 
 import asyncio
+import json
 import sys
 import unittest
 import uuid
@@ -99,6 +100,32 @@ class TestRuntimeBackendClient(unittest.TestCase):
         self.assertIn(b'"name":"Acme"', seen["json"])
         self.assertEqual(result["name"], "Acme")
         self.assertIn("entity_id", result)
+
+    def test_create_chart_serializes_corporate_starter_contract(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["json"] = json.loads(request.read())
+            return httpx.Response(200, json={"id": str(uuid.uuid4())})
+
+        client = _client(handler)
+        book_id = uuid.uuid4()
+        entity_id = uuid.uuid4()
+        resource_type_id = uuid.uuid4()
+        asyncio.run(
+            client.create_chart(
+                book_id,
+                entity_id=entity_id,
+                name="Primary",
+                starter_template="CORPORATE",
+                resource_type_id=resource_type_id,
+            )
+        )
+        self.assertEqual(seen["json"]["entity_id"], str(entity_id))
+        self.assertEqual(seen["json"]["starter_template"], "CORPORATE")
+        self.assertEqual(
+            seen["json"]["resource_type_id"], str(resource_type_id)
+        )
 
     def test_deploy_workflow_serializes_uuids_as_strings(self):
         seen = {}

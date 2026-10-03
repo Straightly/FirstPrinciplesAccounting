@@ -92,6 +92,8 @@ pub fn fixture() -> Fx {
                 name: "Main".into(),
                 description: None,
                 activate: true,
+                starter_template: ChartTemplate::Empty,
+                resource_type_id: None,
             },
         )
         .unwrap();

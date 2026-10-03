@@ -148,6 +148,8 @@ def create_server(config: Config | None = None) -> FastMCP:
         ctx: Context,
         description: str | None = None,
         activate: bool = True,
+        starter_template: str = "EMPTY",
+        resource_type_id: str | None = None,
     ) -> dict[str, Any]:
         return await tools.create_chart(
             ctx_of(ctx),
@@ -156,6 +158,8 @@ def create_server(config: Config | None = None) -> FastMCP:
             name=name,
             description=description,
             activate=activate,
+            starter_template=starter_template,
+            resource_type_id=resource_type_id,
         )
 
     @server.tool()

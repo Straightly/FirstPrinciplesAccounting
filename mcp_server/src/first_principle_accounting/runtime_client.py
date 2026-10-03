@@ -127,6 +127,8 @@ class RuntimeBackendClient:
         name: str,
         description: str | None = None,
         activate: bool = True,
+        starter_template: str = "EMPTY",
+        resource_type_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
@@ -137,6 +139,10 @@ class RuntimeBackendClient:
                 "name": name,
                 "description": description,
                 "activate": activate,
+                "starter_template": starter_template,
+                "resource_type_id": (
+                    str(resource_type_id) if resource_type_id is not None else None
+                ),
             },
         )
 
