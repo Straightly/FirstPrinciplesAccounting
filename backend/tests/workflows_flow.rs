@@ -130,6 +130,62 @@ async fn id_field(response: axum::response::Response) -> Uuid {
     Uuid::parse_str(body_json(response).await["id"].as_str().unwrap()).unwrap()
 }
 
+#[tokio::test]
+async fn book_owner_can_assign_role_to_self_but_other_user_cannot_self_grant() {
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let app = app_over(books_dir.path(), artifacts_dir.path());
+    let (owner_cookie, owner_id) = dev_login(&app, OWNER).await;
+    let (book_id, entity_id) = create_book(&app, &owner_cookie).await;
+    let role_id = id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/roles"),
+            &owner_cookie,
+            json!({ "op_id": Uuid::new_v4(), "entity_id": entity_id,
+                "name": "Importer", "description": null }),
+        )
+        .await,
+    )
+    .await;
+    let path = format!("/api/books/{book_id}/roles/{role_id}/users");
+    let (employee_cookie, _) = dev_login(&app, EMPLOYEE).await;
+    let denied = post(
+        &app,
+        &path,
+        &employee_cookie,
+        json!({ "op_id": Uuid::new_v4(), "assign_to_self": true }),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let op_id = Uuid::new_v4();
+    let self_assignment = json!({ "op_id": op_id, "assign_to_self": true });
+    let assigned = post(&app, &path, &owner_cookie, self_assignment.clone()).await;
+    assert_eq!(assigned.status(), StatusCode::OK);
+    let replay = post(&app, &path, &owner_cookie, self_assignment).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/roles?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(roles[0]["assigned_user_ids"], json!([owner_id]));
+
+    let ambiguous = post(
+        &app,
+        &path,
+        &owner_cookie,
+        json!({ "op_id": Uuid::new_v4(), "assign_to_self": true, "user_email": EMPLOYEE }),
+    )
+    .await;
+    assert_eq!(ambiguous.status(), StatusCode::BAD_REQUEST);
+}
+
 /// Writes a minimal, valid dev artifact to disk so `hash_artifact` succeeds.
 fn write_artifact(dev_artifacts_dir: &std::path::Path, deployment_id: Uuid) {
     let dir = dev_artifacts_dir

@@ -75,6 +75,38 @@ describe("FPA application shell", () => {
     expect(screen.queryByRole("link", { name: "Launch workflow" })).toBeNull();
   });
 
+  it("lets the book owner assign a selected role to themselves", async () => {
+    const roleId = "55555555-5555-4555-8555-555555555555";
+    let assigned = false;
+    const fetchMock = vi.fn((path, options = {}) => {
+      const value = String(path);
+      if (value === "/api/auth/config") return response({ providers: [], dev_login_enabled: true });
+      if (value === "/api/auth/me") return response({ user: { user_id: "owner-id", email: "owner@example.com", display_name: "Owner" }, is_bootstrap_owner: true, allowed_actions: [] });
+      if (value === "/api/books/mine") return response([book]);
+      if (value.includes("/workflows/mine")) return response(assigned ? [workflow] : []);
+      if (value.endsWith(`/roles/${roleId}/users`) && options.method === "POST") {
+        expect(JSON.parse(options.body).assign_to_self).toBe(true);
+        assigned = true;
+        return response({ id: roleId });
+      }
+      if (value.endsWith("/entities")) return response([{ entity_id: book.entity_id, name: "Test Book" }]);
+      if (value.endsWith("/resource-types") || value.includes("/charts?") || value.includes("/periods?") || value.endsWith("/prices") || value.includes("/entries?") || value.endsWith("/audit-log") || value.endsWith("/workflow-artifacts") || value.endsWith("/users")) return response([]);
+      if (value.includes("/roles?")) return response([{ role_id: roleId, name: "Importer", description: null, workflow_ids: [workflow.workflow_id], assigned_user_ids: assigned ? ["owner-id"] : [] }]);
+      if (value.includes("/workflows?")) return response([workflow]);
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /Test Book/ }));
+    await user.click(await screen.findByRole("button", { name: "Workflows & roles" }));
+    const selfButton = await screen.findByRole("button", { name: "Assign to me" });
+    await user.selectOptions(within(selfButton.closest("form")).getByRole("combobox", { name: "Role" }), roleId);
+    await user.click(selfButton);
+    await waitFor(() => expect(screen.getByRole("link", { name: "Launch workflow" })).toBeTruthy());
+    expect(selfButton.disabled).toBe(true);
+  });
+
   it("finishes a posted entry with cleared required fields and fresh client identifiers", async () => {
     let uuidSequence = 0;
     crypto.randomUUID.mockImplementation(() => `00000000-0000-4000-8000-${String(++uuidSequence).padStart(12, "0")}`);

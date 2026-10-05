@@ -1225,6 +1225,8 @@ pub struct AssignRoleToUserRequest {
     pub user_id: Option<Uuid>,
     #[serde(default)]
     pub user_email: Option<String>,
+    #[serde(default)]
+    pub assign_to_self: bool,
 }
 
 pub async fn assign_role_to_user(
@@ -1234,15 +1236,16 @@ pub async fn assign_role_to_user(
     Json(body): Json<AssignRoleToUserRequest>,
 ) -> Result<Json<IdResponse>, ApiError> {
     let (user, open_book) = book_context(&state, &headers, book_id).await?;
-    let target_user_id = match (body.user_id, body.user_email.as_deref()) {
-        (Some(user_id), None) => user_id,
-        (None, Some(email)) if email.trim().contains('@') => {
+    let target_user_id = match (body.user_id, body.user_email.as_deref(), body.assign_to_self) {
+        (None, None, true) => user.user_id,
+        (Some(user_id), None, false) => user_id,
+        (None, Some(email), false) if email.trim().contains('@') => {
             state.users.resolve_email(email).user_id
         }
-        (None, Some(_)) => return Err(ApiError::invalid_input("user email is invalid")),
+        (None, Some(_), false) => return Err(ApiError::invalid_input("user email is invalid")),
         _ => {
             return Err(ApiError::invalid_input(
-                "provide exactly one of user_id or user_email",
+                "provide exactly one of user_id, user_email, or assign_to_self",
             ))
         }
     };
