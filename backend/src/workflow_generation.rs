@@ -59,9 +59,18 @@ pub async fn generate(
     frontend_dist: &str,
     request: GenerateWorkflowArtifactRequest,
 ) -> Result<WorkflowArtifactSummary, String> {
+    generate_with_workflow_id(dev_artifacts_dir, frontend_dist, request, None).await
+}
+
+pub async fn generate_with_workflow_id(
+    dev_artifacts_dir: &str,
+    frontend_dist: &str,
+    request: GenerateWorkflowArtifactRequest,
+    existing_workflow_id: Option<Uuid>,
+) -> Result<WorkflowArtifactSummary, String> {
     validate_request(&request)?;
     let workflow_deployment_id = Uuid::new_v4();
-    let workflow_id = Uuid::new_v4();
+    let workflow_id = existing_workflow_id.unwrap_or_else(Uuid::new_v4);
     let root = workflows_root(dev_artifacts_dir);
     let target = root.join(workflow_deployment_id.to_string());
     let temporary = root.join(format!(".{workflow_deployment_id}.tmp"));
@@ -194,7 +203,14 @@ pub async fn generate(
         workflow_id,
         workflow_name,
         description,
-        backend_api_calls: vec!["post_entry".to_string()],
+        backend_api_calls: if opening_import {
+            vec![
+                "prepare_opening_import_entities".to_string(),
+                "post_entry".to_string(),
+            ]
+        } else {
+            vec!["post_entry".to_string()]
+        },
         required_inputs,
         metadata,
         artifact_path: target.to_string_lossy().into_owned(),

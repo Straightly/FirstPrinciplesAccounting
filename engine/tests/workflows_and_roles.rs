@@ -72,6 +72,86 @@ fn deploy_workflow_auto_creates_a_role_with_exactly_that_workflow() {
 }
 
 #[test]
+fn same_name_redeployment_keeps_role_and_permission_assignments() {
+    let mut fx = fixture();
+    let (old_deployment, workflow_id) = deploy_startup_expense(&mut fx);
+    let role_id = fx.engine.list_roles(fx.entity)[0].role_id;
+    let user_id = Uuid::new_v4();
+    fx.engine
+        .assign_role_to_user(id(), fx.actor, role_id, user_id)
+        .unwrap();
+    let permission_op = id();
+    fx.engine
+        .add_role_permission(permission_op, fx.actor, role_id, "list_accounts".into())
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .add_role_permission(permission_op, fx.actor, role_id, "list_accounts".into())
+            .unwrap(),
+        role_id
+    );
+    let new_deployment = Uuid::new_v4();
+    fx.engine
+        .deploy_workflow(
+            fx.actor,
+            NewWorkflowDeployment {
+                workflow_deployment_id: new_deployment,
+                workflow_id,
+                entity_id: fx.entity,
+                workflow_name: "Recording startup expense".into(),
+                description: Some("Replacement".into()),
+                artifact_id: new_deployment,
+                dev_artifact_path: "new-artifact".into(),
+                manifest_hash: "new-manifest".into(),
+                code_hash: "new-code".into(),
+                frontend_route: "/workflows/new/code/index.html".into(),
+                backend_api_calls: vec!["post_entry".into()],
+                required_inputs: Value::Null,
+                metadata: Value::Null,
+            },
+        )
+        .unwrap();
+    assert_eq!(fx.engine.list_workflows(fx.entity).len(), 1);
+    assert_eq!(
+        fx.engine.list_workflows(fx.entity)[0].workflow_deployment_id,
+        new_deployment
+    );
+    assert!(fx.engine.get_workflow(old_deployment).is_some());
+    assert_eq!(fx.engine.list_roles(fx.entity).len(), 1);
+    assert_eq!(
+        fx.engine.list_roles(fx.entity)[0].permissions,
+        vec!["list_accounts"]
+    );
+    assert_eq!(fx.engine.users_for_role(role_id), vec![user_id]);
+    assert_eq!(
+        fx.engine.workflows_authorized_for_user(user_id, fx.entity)[0].workflow_deployment_id,
+        new_deployment
+    );
+    let old_context = WorkflowContext {
+        workflow_id,
+        workflow_deployment_id: old_deployment,
+        workflow_execution_id: Uuid::new_v4(),
+    };
+    assert_eq!(
+        fx.engine
+            .authorize_workflow_api(user_id, fx.entity, &old_context, "post_entry")
+            .unwrap_err()
+            .error_code,
+        ErrorCode::InvalidExecutionContext
+    );
+    let new_context = WorkflowContext {
+        workflow_id,
+        workflow_deployment_id: new_deployment,
+        workflow_execution_id: Uuid::new_v4(),
+    };
+    fx.engine
+        .authorize_workflow_api(user_id, fx.entity, &new_context, "post_entry")
+        .unwrap();
+    let replayed = EngineState::replay(fx.book, fx.engine.audit_log()).unwrap();
+    assert_eq!(&replayed, fx.engine.state());
+}
+
+#[test]
 fn deploy_workflow_is_idempotent_and_conflicts_on_tamper() {
     let mut fx = fixture();
     let deployment_id = Uuid::new_v4();

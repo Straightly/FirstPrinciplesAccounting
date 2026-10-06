@@ -1059,6 +1059,59 @@ async fn l4_browser_generation_deployment_and_email_assignment_lifecycle() {
     )
     .await;
     assert_eq!(roles[0]["assigned_user_ids"][0], employee_id.to_string());
+    let replacement = body_json(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/workflow-artifacts"),
+            &owner_cookie,
+            json!({"workflow_name":"L4 browser journal","description":"Updated template"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(replacement["workflow_id"], workflow_id);
+    let replacement_id = replacement["workflow_deployment_id"].as_str().unwrap();
+    assert_ne!(replacement_id, deployment_id);
+    let replaced = post(&app, &format!("/api/books/{book_id}/workflows/deploy"), &owner_cookie,
+        json!({"workflow_deployment_id":replacement_id,"workflow_id":workflow_id,"entity_id":entity_id,
+            "workflow_name":"L4 browser journal","description":"Updated template",
+            "backend_api_calls":replacement["backend_api_calls"],"required_inputs":replacement["required_inputs"],
+            "metadata":replacement["metadata"]})).await;
+    assert_eq!(replaced.status(), StatusCode::OK);
+    let grant = post(
+        &app,
+        &format!("/api/books/{book_id}/roles/{role_id}/permissions"),
+        &owner_cookie,
+        json!({"op_id":Uuid::new_v4(),"permission":"list_resource_types"}),
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::OK);
+    let mine = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/workflows/mine?entity_id={entity_id}"),
+            &employee_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(mine.as_array().unwrap().len(), 1);
+    assert_eq!(mine[0]["workflow_deployment_id"], replacement_id);
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/roles?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(roles.as_array().unwrap().len(), 1);
+    assert_eq!(roles[0]["assigned_user_ids"][0], employee_id.to_string());
+    assert!(roles[0]["permissions"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("list_resource_types")));
 }
 
 #[tokio::test]
@@ -1628,5 +1681,9 @@ async fn opening_import_generator_packages_the_specific_spa_and_metadata() {
         std::fs::read_to_string(std::path::Path::new(&generated.artifact_path).join("code/app.js"))
             .unwrap();
     assert!(app_js.contains("/opening-import"));
+    assert!(app_js.contains("Finish mapping"));
+    assert!(app_js.contains("Create new"));
+    assert!(app_js.contains("/accounts`"));
+    assert!(app_js.contains("Post opening balances"));
     assert!(app_js.contains(&generated.workflow_id.to_string()));
 }

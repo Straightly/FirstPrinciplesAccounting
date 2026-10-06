@@ -141,6 +141,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(books_api::assign_workflow_to_role),
         )
         .route(
+            "/books/{book_id}/roles/{role_id}/permissions",
+            post(books_api::add_role_permission),
+        )
+        .route(
             "/books/{book_id}/roles/{role_id}/users",
             post(books_api::assign_role_to_user),
         );

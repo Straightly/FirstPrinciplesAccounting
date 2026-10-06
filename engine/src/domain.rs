@@ -381,6 +381,10 @@ pub enum EventPayload {
         role_id: Uuid,
         workflow_id: Uuid,
     },
+    RolePermissionAdded {
+        role_id: Uuid,
+        permission: String,
+    },
     RoleAssignedToUser {
         role_id: Uuid,
         user_id: Uuid,
@@ -412,6 +416,7 @@ impl EventPayload {
             EventPayload::WorkflowDeployed { .. } => EventType::WorkflowDeployment,
             EventPayload::RoleCreated { .. }
             | EventPayload::WorkflowAssignedToRole { .. }
+            | EventPayload::RolePermissionAdded { .. }
             | EventPayload::RoleAssignedToUser { .. } => EventType::RoleAssignment,
             EventPayload::BookOwnerChanged { .. } => EventType::Administrative,
         }
@@ -438,6 +443,7 @@ impl EventPayload {
             EventPayload::WorkflowDeployed { definition } => definition.workflow_deployment_id,
             EventPayload::RoleCreated { role } => role.role_id,
             EventPayload::WorkflowAssignedToRole { role_id, .. } => *role_id,
+            EventPayload::RolePermissionAdded { role_id, .. } => *role_id,
             EventPayload::RoleAssignedToUser { role_id, .. } => *role_id,
             EventPayload::BookOwnerChanged { .. } => Uuid::nil(),
         }

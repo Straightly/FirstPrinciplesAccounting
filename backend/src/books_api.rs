@@ -1059,6 +1059,10 @@ pub async fn opening_import_context(
             workflow.entity_id == entity_id
                 && workflow.metadata["kind"] == "opening_balance_import"
                 && engine
+                    .list_workflows(entity_id)
+                    .iter()
+                    .any(|latest| latest.workflow_deployment_id == workflow.workflow_deployment_id)
+                && engine
                     .workflows_authorized_for_user(user.user_id, entity_id)
                     .iter()
                     .any(|allowed| allowed.workflow_id == workflow.workflow_id)
@@ -1326,6 +1330,37 @@ pub async fn deploy_workflow(
     let hashed = crate::dev_artifacts::hash_artifact(&dir)
         .await
         .map_err(ApiError::invalid_input)?;
+    let manifest_bytes = tokio::fs::read(dir.join("manifest.json"))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| ApiError::invalid_input(error.to_string()))?;
+    if manifest["generator"] == "packaged-template:v1" {
+        if manifest["workflow_deployment_id"] != body.workflow_deployment_id.to_string() {
+            return Err(ApiError::invalid_input(
+                "artifact deployment ID does not match request",
+            ));
+        }
+        let workflow_bytes = tokio::fs::read(dir.join("workflow.json"))
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let workflow: serde_json::Value = serde_json::from_slice(&workflow_bytes)
+            .map_err(|error| ApiError::invalid_input(error.to_string()))?;
+        if manifest["workflow_id"] != body.workflow_id.to_string()
+            || workflow["workflow_name"] != body.workflow_name
+            || workflow["backend_api_calls"] != serde_json::json!(body.backend_api_calls)
+            || workflow["metadata"]
+                != if body.metadata.is_null() {
+                    serde_json::json!({})
+                } else {
+                    body.metadata.clone()
+                }
+        {
+            return Err(ApiError::invalid_input(
+                "deployment request does not match generated artifact",
+            ));
+        }
+    }
     let spec = NewWorkflowDeployment {
         workflow_deployment_id: body.workflow_deployment_id,
         workflow_id: body.workflow_id,
@@ -1471,11 +1506,30 @@ pub async fn generate_workflow_artifact(
     Path(book_id): Path<Uuid>,
     Json(body): Json<crate::workflow_generation::GenerateWorkflowArtifactRequest>,
 ) -> Result<Json<crate::workflow_generation::WorkflowArtifactSummary>, ApiError> {
-    let _ = book_context(&state, &headers, book_id).await?;
-    let artifact = crate::workflow_generation::generate(
+    let (_, open_book) = book_context(&state, &headers, book_id).await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let existing_workflow_id = {
+        let engine = open_book.engine.read().await;
+        let prior = engine
+            .list_workflows(subject_id)
+            .into_iter()
+            .find(|workflow| workflow.workflow_name == body.workflow_name.trim());
+        if let Some(prior) = prior {
+            let requested_kind = body.kind.as_deref().unwrap_or("journal");
+            let prior_kind = prior.metadata["kind"].as_str().unwrap_or("journal");
+            if requested_kind != prior_kind {
+                return Err(ApiError::invalid_input(
+                    "same-name workflow replacement must keep its kind",
+                ));
+            }
+        }
+        prior.map(|workflow| workflow.workflow_id)
+    };
+    let artifact = crate::workflow_generation::generate_with_workflow_id(
         &state.config.generated_workflows_dir,
         &state.config.frontend_dist,
         body,
+        existing_workflow_id,
     )
     .await
     .map_err(ApiError::invalid_input)?;
@@ -1545,6 +1599,26 @@ pub async fn assign_workflow_to_role(
     let (user, open_book) = book_context(&state, &headers, book_id).await?;
     let id = mutate(&open_book, |engine| {
         engine.assign_workflow_to_role(body.op_id, user.user_id, role_id, body.workflow_id)
+    })
+    .await?;
+    Ok(Json(IdResponse { id }))
+}
+
+#[derive(Deserialize)]
+pub struct AddRolePermissionRequest {
+    pub op_id: Uuid,
+    pub permission: String,
+}
+
+pub async fn add_role_permission(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((book_id, role_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<AddRolePermissionRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    let (user, open_book) = book_context(&state, &headers, book_id).await?;
+    let id = mutate(&open_book, |engine| {
+        engine.add_role_permission(body.op_id, user.user_id, role_id, body.permission)
     })
     .await?;
     Ok(Json(IdResponse { id }))
