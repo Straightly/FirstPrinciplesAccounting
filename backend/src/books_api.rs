@@ -708,8 +708,33 @@ pub async fn list_accounts(
     Path(book_id): Path<Uuid>,
     Query(filter): Query<ChartFilter>,
 ) -> Result<Json<Vec<Account>>, ApiError> {
-    let (_, open_book) = book_context(&state, &headers, book_id).await?;
+    let (user, open_book) = open_book_for_any_user(&state, &headers, book_id).await?;
+    let meta = open_book.meta.read().await;
+    let is_owner = user
+        .email
+        .trim()
+        .eq_ignore_ascii_case(meta.owner_email.trim());
+    let entity_id = meta.entity_id;
+    drop(meta);
     let engine = open_book.engine.read().await;
+    if !is_owner && !engine.user_has_permission(user.user_id, entity_id, "list_accounts") {
+        state.audit.record(
+            "authorization",
+            &user.email,
+            "denied",
+            "list_accounts requires book ownership or an assigned permission role",
+        );
+        return Err(ApiError::unauthorized_api(
+            "list_accounts requires book ownership or an assigned role granting list_accounts",
+        ));
+    }
+    if !engine
+        .list_charts(entity_id)
+        .iter()
+        .any(|chart| chart.chart_id == filter.chart_id)
+    {
+        return Err(ApiError::invalid_input("unknown chart in this book entity"));
+    }
     Ok(Json(
         engine
             .list_accounts(filter.chart_id)
@@ -1236,7 +1261,11 @@ pub async fn assign_role_to_user(
     Json(body): Json<AssignRoleToUserRequest>,
 ) -> Result<Json<IdResponse>, ApiError> {
     let (user, open_book) = book_context(&state, &headers, book_id).await?;
-    let target_user_id = match (body.user_id, body.user_email.as_deref(), body.assign_to_self) {
+    let target_user_id = match (
+        body.user_id,
+        body.user_email.as_deref(),
+        body.assign_to_self,
+    ) {
         (None, None, true) => user.user_id,
         (Some(user_id), None, false) => user_id,
         (None, Some(email), false) if email.trim().contains('@') => {

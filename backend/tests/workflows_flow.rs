@@ -186,6 +186,89 @@ async fn book_owner_can_assign_role_to_self_but_other_user_cannot_self_grant() {
     assert_eq!(ambiguous.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn list_accounts_requires_owner_or_explicit_role_permission() {
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let app = app_over(books_dir.path(), artifacts_dir.path());
+    let (owner_cookie, _) = dev_login(&app, OWNER).await;
+    let (book_id, entity_id, _, _) = setup_book(&app, &owner_cookie).await;
+    let charts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/charts?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let chart_id = charts[0]["chart_id"].as_str().unwrap();
+    let accounts_path = format!("/api/books/{book_id}/accounts?chart_id={chart_id}");
+    let (employee_cookie, employee_id) = dev_login(&app, EMPLOYEE).await;
+    assert_eq!(
+        get(&app, &accounts_path, &employee_cookie).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let unrelated_role = id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/roles"),
+            &owner_cookie,
+            json!({ "op_id": Uuid::new_v4(), "entity_id": entity_id,
+                "name": "Other workflow role", "description": null }),
+        )
+        .await,
+    )
+    .await;
+    let unrelated_assignment = post(
+        &app,
+        &format!("/api/books/{book_id}/roles/{unrelated_role}/users"),
+        &owner_cookie,
+        json!({ "op_id": Uuid::new_v4(), "user_id": employee_id }),
+    )
+    .await;
+    assert_eq!(unrelated_assignment.status(), StatusCode::OK);
+    assert_eq!(
+        get(&app, &accounts_path, &employee_cookie).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let role_id = id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/roles"),
+            &owner_cookie,
+            json!({ "op_id": Uuid::new_v4(), "entity_id": entity_id,
+                "name": "Account reader", "description": null,
+                "permissions": ["list_accounts"] }),
+        )
+        .await,
+    )
+    .await;
+    let assigned = post(
+        &app,
+        &format!("/api/books/{book_id}/roles/{role_id}/users"),
+        &owner_cookie,
+        json!({ "op_id": Uuid::new_v4(), "user_id": employee_id }),
+    )
+    .await;
+    assert_eq!(assigned.status(), StatusCode::OK);
+    let accounts = body_json(get(&app, &accounts_path, &employee_cookie).await).await;
+    assert_eq!(accounts.as_array().unwrap().len(), 2);
+
+    let invalid = post(
+        &app,
+        &format!("/api/books/{book_id}/roles"),
+        &owner_cookie,
+        json!({ "op_id": Uuid::new_v4(), "entity_id": entity_id,
+            "name": "Unsafe role", "description": null,
+            "permissions": ["delete_book"] }),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
+
 /// Writes a minimal, valid dev artifact to disk so `hash_artifact` succeeds.
 fn write_artifact(dev_artifacts_dir: &std::path::Path, deployment_id: Uuid) {
     let dir = dev_artifacts_dir

@@ -223,6 +223,8 @@ pub struct Role {
     pub name: String,
     pub description: Option<String>,
     pub workflow_ids: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
     pub created_at: TimestampMs,
 }
 

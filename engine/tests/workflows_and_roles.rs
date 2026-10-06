@@ -11,6 +11,20 @@ use ledgerzero_engine::{EngineState, ErrorCode};
 use serde_json::Value;
 use uuid::Uuid;
 
+#[test]
+fn empty_role_permissions_keep_previous_serialized_request_shape() {
+    let role = NewRole {
+        entity_id: Uuid::new_v4(),
+        name: "Legacy role".into(),
+        description: None,
+        permissions: Vec::new(),
+    };
+    let value = serde_json::to_value(&role).unwrap();
+    assert!(value.get("permissions").is_none());
+    let round_trip: NewRole = serde_json::from_value(value).unwrap();
+    assert!(round_trip.permissions.is_empty());
+}
+
 fn deploy_startup_expense(fx: &mut Fx) -> (Uuid, Uuid) {
     let deployment_id = Uuid::new_v4();
     let workflow_id = Uuid::new_v4();
@@ -129,6 +143,7 @@ fn deploy_workflow_rejects_name_collision_with_existing_workflow_or_role() {
                 entity_id: fx.entity,
                 name: "Manually named role".into(),
                 description: None,
+                permissions: Vec::new(),
             },
         )
         .unwrap();
@@ -169,6 +184,7 @@ fn create_role_assign_workflow_assign_user_round_trip() {
                 entity_id: fx.entity,
                 name: "Composite Role".into(),
                 description: Some("bundles workflows".into()),
+                permissions: Vec::new(),
             },
         )
         .unwrap();
@@ -455,6 +471,7 @@ fn entities_with_workflows_for_user_backs_the_picker() {
                 entity_id: fx.entity,
                 name: "Empty role".into(),
                 description: None,
+                permissions: Vec::new(),
             },
         )
         .unwrap();

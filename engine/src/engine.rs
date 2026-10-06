@@ -168,6 +168,8 @@ pub struct NewRole {
     pub entity_id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,6 +1292,7 @@ impl AccountingEngine {
             name: spec.workflow_name,
             description: None,
             workflow_ids: vec![workflow_id],
+            permissions: Vec::new(),
             created_at: self.clock.now_ms(),
         };
         self.record(
@@ -1318,6 +1321,16 @@ impl AccountingEngine {
         if spec.name.trim().is_empty() {
             return Err(EngineError::invalid_input("role name must not be empty"));
         }
+        if spec
+            .permissions
+            .iter()
+            .any(|permission| permission != "list_accounts")
+            || spec.permissions.len() > 1
+        {
+            return Err(EngineError::invalid_input(
+                "role permissions must contain list_accounts at most once",
+            ));
+        }
         if self
             .state
             .roles
@@ -1335,6 +1348,7 @@ impl AccountingEngine {
             name: spec.name,
             description: spec.description,
             workflow_ids: Vec::new(),
+            permissions: spec.permissions,
             created_at: self.clock.now_ms(),
         };
         Ok(self.record(op_id, actor, request, EventPayload::RoleCreated { role }))
@@ -1427,6 +1441,18 @@ impl AccountingEngine {
                     .get(&r.role_id)
                     .is_some_and(|users| users.contains(&user_id))
             })
+    }
+
+    pub fn user_has_permission(&self, user_id: Uuid, entity_id: Uuid, permission: &str) -> bool {
+        self.state.roles.values().any(|role| {
+            role.entity_id == entity_id
+                && role.permissions.iter().any(|granted| granted == permission)
+                && self
+                    .state
+                    .role_assignments
+                    .get(&role.role_id)
+                    .is_some_and(|users| users.contains(&user_id))
+        })
     }
 
     /// Workflow-scoped authorization and execution-context verification
