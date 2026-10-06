@@ -350,6 +350,147 @@ async fn backup_close_restore_preserves_book_id_and_original_passphrase_keeps_wo
 }
 
 #[tokio::test]
+async fn referenced_entities_and_associated_accounts_survive_backup_restore() {
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let backup_location = tempfile::tempdir().unwrap();
+    let app = app_over(books_dir.path(), artifacts_dir.path());
+    let cookie = dev_login(&app, OWNER).await;
+    let (book_id, subject_id, _, _) = seed_book(&app, &cookie).await;
+    let property_response = post(
+        &app,
+        &format!("/api/books/{book_id}/entities"),
+        &cookie,
+        json!({"op_id": Uuid::new_v4(), "name": "Elm House", "category": "PROPERTY"}),
+    )
+    .await;
+    assert_eq!(property_response.status(), StatusCode::OK);
+    let property_id = body_json(property_response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let relationship_response = post(
+        &app,
+        &format!("/api/books/{book_id}/entity-relationships"),
+        &cookie,
+        json!({"op_id": Uuid::new_v4(), "from_entity_id": subject_id, "to_entity_id": property_id,
+            "kind": "OWNS", "effective_from": "2026-01-01", "effective_to": null}),
+    )
+    .await;
+    assert_eq!(relationship_response.status(), StatusCode::OK);
+    let chart = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/charts?entity_id={subject_id}"),
+            &cookie,
+        )
+        .await,
+    )
+    .await;
+    let resources = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/resource-types"),
+            &cookie,
+        )
+        .await,
+    )
+    .await;
+    let account_response = post(&app, &format!("/api/books/{book_id}/accounts"), &cookie,
+        json!({"op_id": Uuid::new_v4(), "chart_id": chart[0]["chart_id"], "name": "Elm rent",
+            "code": null, "account_type": "REVENUE", "resource_type_id": resources[0]["resource_type_id"],
+            "parent_account_id": null, "associated_entity_id": property_id, "validation_rules": {}, "metadata": {}})).await;
+    assert_eq!(account_response.status(), StatusCode::OK);
+    let account_id = body_json(account_response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/backup"),
+            &cookie,
+            json!({"location": backup_location.path().to_string_lossy()})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/close"),
+            &cookie,
+            json!({})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            "/api/books/restore",
+            &cookie,
+            json!({"location": backup_location.path().to_string_lossy()})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/open"),
+            &cookie,
+            json!({"passphrase": "correct horse battery staple"})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let entities =
+        body_json(get(&app, &format!("/api/books/{book_id}/entities"), &cookie).await).await;
+    assert_eq!(entities.as_array().unwrap().len(), 2);
+    assert!(entities
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["entity_id"] == property_id));
+    let relationships = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/entity-relationships"),
+            &cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(relationships[0]["to_entity_id"], property_id);
+    let accounts = body_json(
+        get(
+            &app,
+            &format!(
+                "/api/books/{book_id}/accounts?chart_id={}",
+                chart[0]["chart_id"].as_str().unwrap()
+            ),
+            &cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["account_id"] == account_id)
+            .unwrap()["associated_entity_id"],
+        property_id
+    );
+}
+
+#[tokio::test]
 async fn close_book_is_idempotent_and_owner_gated() {
     let books_dir = tempfile::tempdir().unwrap();
     let artifacts_dir = tempfile::tempdir().unwrap();

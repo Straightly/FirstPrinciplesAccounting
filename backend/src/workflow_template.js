@@ -73,8 +73,8 @@ function App() {
           workflow_execution_id: crypto.randomUUID(),
         },
         lines: [
-          { line_id: crypto.randomUUID(), account_id: form.primary_account_id, debit_amount: primaryDebit ? form.amount : null, credit_amount: primaryDebit ? null : form.amount, memo: form.memo || null },
-          { line_id: crypto.randomUUID(), account_id: form.offset_account_id, debit_amount: primaryDebit ? null : form.amount, credit_amount: primaryDebit ? form.amount : null, memo: form.memo || null },
+          { line_id: crypto.randomUUID(), account_id: form.primary_account_id, attribution_entity_id: accounts.find((account) => account.account_id === form.primary_account_id)?.associated_entity_id || null, debit_amount: primaryDebit ? form.amount : null, credit_amount: primaryDebit ? null : form.amount, memo: form.memo || null },
+          { line_id: crypto.randomUUID(), account_id: form.offset_account_id, attribution_entity_id: accounts.find((account) => account.account_id === form.offset_account_id)?.associated_entity_id || null, debit_amount: primaryDebit ? null : form.amount, credit_amount: primaryDebit ? form.amount : null, memo: form.memo || null },
         ],
       }),
     });

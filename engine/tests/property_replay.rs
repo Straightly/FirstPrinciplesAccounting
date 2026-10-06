@@ -63,6 +63,7 @@ fn rng_line(
     NewLine {
         line_id: rng.uuid(),
         account_id,
+        attribution_entity_id: None,
         debit_amount: debit,
         credit_amount: credit,
         memo: None,

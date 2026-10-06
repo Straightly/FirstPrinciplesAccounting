@@ -85,6 +85,57 @@ async fn open_book_for_any_user(
     Ok((user, open_book))
 }
 
+async fn book_with_permission(
+    state: &SharedState,
+    headers: &HeaderMap,
+    book_id: Uuid,
+    permission: &str,
+) -> Result<(User, Arc<OpenBook>, bool), ApiError> {
+    let (user, open_book) = open_book_for_any_user(state, headers, book_id).await?;
+    let meta = open_book.meta.read().await;
+    let is_owner = user
+        .email
+        .trim()
+        .eq_ignore_ascii_case(meta.owner_email.trim());
+    let subject_id = meta.entity_id;
+    drop(meta);
+    if !is_owner
+        && !open_book
+            .engine
+            .read()
+            .await
+            .user_has_permission(user.user_id, subject_id, permission)
+    {
+        state.audit.record(
+            "authorization",
+            &user.email,
+            "denied",
+            &format!("{permission} requires an assigned role"),
+        );
+        return Err(ApiError::unauthorized_api(format!(
+            "{permission} requires an assigned role"
+        )));
+    }
+    Ok((user, open_book, is_owner))
+}
+
+fn require_mutation_permission(
+    engine: &AccountingEngine,
+    user_id: Uuid,
+    subject_id: Uuid,
+    permission: &str,
+    is_owner: bool,
+) -> Result<(), ledgerzero_engine::EngineError> {
+    if is_owner || engine.user_has_permission(user_id, subject_id, permission) {
+        Ok(())
+    } else {
+        Err(ledgerzero_engine::EngineError::new(
+            ledgerzero_engine::ErrorCode::UnauthorizedApi,
+            format!("{permission} role was removed"),
+        ))
+    }
+}
+
 #[derive(Serialize)]
 pub struct IdResponse {
     pub id: Uuid,
@@ -569,17 +620,87 @@ pub async fn list_my_books(
 /// GET /api/books/:book_id/entities — inspection only (Impl Plan M7): a book
 /// has exactly one entity, auto-created with the book and already available
 /// as `entity_id` on every `list_books`/`list_my_books`/`create_book`
-/// response, so this always returns exactly one result. There is no
-/// `create_entity` endpoint — creating a second entity in a book is not a
-/// supported operation (use `create_sub_book` for related legal entities).
+/// The subject and referenced identities share this book-local directory.
 pub async fn list_entities(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(book_id): Path<Uuid>,
 ) -> Result<Json<Vec<Entity>>, ApiError> {
-    let (_, open_book) = book_context(&state, &headers, book_id).await?;
+    let (_, open_book, _) =
+        book_with_permission(&state, &headers, book_id, "list_entities").await?;
     let engine = open_book.engine.read().await;
     Ok(Json(engine.list_entities().into_iter().cloned().collect()))
+}
+
+#[derive(Deserialize)]
+pub struct CreateReferencedEntityRequest {
+    pub op_id: Uuid,
+    #[serde(flatten)]
+    pub spec: NewReferencedEntity,
+}
+
+pub async fn create_referenced_entity(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<CreateReferencedEntityRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    let (user, open_book, is_owner) =
+        book_with_permission(&state, &headers, book_id, "create_entity").await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let id = mutate(&open_book, |engine| {
+        require_mutation_permission(engine, user.user_id, subject_id, "create_entity", is_owner)?;
+        engine.create_referenced_entity(body.op_id, user.user_id, body.spec)
+    })
+    .await?;
+    Ok(Json(IdResponse { id }))
+}
+
+pub async fn list_entity_relationships(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+) -> Result<Json<Vec<EntityRelationship>>, ApiError> {
+    let (_, open_book, _) =
+        book_with_permission(&state, &headers, book_id, "list_entities").await?;
+    let engine = open_book.engine.read().await;
+    Ok(Json(
+        engine
+            .list_entity_relationships()
+            .into_iter()
+            .cloned()
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct CreateEntityRelationshipRequest {
+    pub op_id: Uuid,
+    #[serde(flatten)]
+    pub spec: NewEntityRelationship,
+}
+
+pub async fn create_entity_relationship(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<CreateEntityRelationshipRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    let (user, open_book, is_owner) =
+        book_with_permission(&state, &headers, book_id, "create_entity_relationship").await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let id = mutate(&open_book, |engine| {
+        require_mutation_permission(
+            engine,
+            user.user_id,
+            subject_id,
+            "create_entity_relationship",
+            is_owner,
+        )?;
+        engine.create_entity_relationship(body.op_id, user.user_id, body.spec)
+    })
+    .await?;
+    Ok(Json(IdResponse { id }))
 }
 
 #[derive(Deserialize)]
@@ -608,7 +729,8 @@ pub async fn list_resource_types(
     headers: HeaderMap,
     Path(book_id): Path<Uuid>,
 ) -> Result<Json<Vec<ResourceType>>, ApiError> {
-    let (_, open_book) = book_context(&state, &headers, book_id).await?;
+    let (_, open_book, _) =
+        book_with_permission(&state, &headers, book_id, "list_resource_types").await?;
     let engine = open_book.engine.read().await;
     Ok(Json(
         engine.list_resource_types().into_iter().cloned().collect(),
@@ -670,7 +792,12 @@ pub async fn list_charts(
     Path(book_id): Path<Uuid>,
     Query(filter): Query<EntityFilter>,
 ) -> Result<Json<Vec<Chart>>, ApiError> {
-    let (_, open_book) = book_context(&state, &headers, book_id).await?;
+    let (_, open_book, _) = book_with_permission(&state, &headers, book_id, "list_charts").await?;
+    if filter.entity_id != open_book.meta.read().await.entity_id {
+        return Err(ApiError::invalid_input(
+            "charts require this book's accounting subject",
+        ));
+    }
     let engine = open_book.engine.read().await;
     Ok(Json(
         engine
@@ -694,8 +821,11 @@ pub async fn create_account(
     Path(book_id): Path<Uuid>,
     Json(body): Json<CreateAccountRequest>,
 ) -> Result<Json<IdResponse>, ApiError> {
-    let (user, open_book) = book_context(&state, &headers, book_id).await?;
+    let (user, open_book, is_owner) =
+        book_with_permission(&state, &headers, book_id, "create_account").await?;
+    let subject_id = open_book.meta.read().await.entity_id;
     let id = mutate(&open_book, |engine| {
+        require_mutation_permission(engine, user.user_id, subject_id, "create_account", is_owner)?;
         engine.create_account(body.op_id, user.user_id, body.spec)
     })
     .await?;
@@ -999,6 +1129,79 @@ pub async fn import_opening_balances(
     })
     .await?;
     Ok(Json(IdResponse { id }))
+}
+
+pub async fn prepare_opening_import_identities(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<crate::opening_import::PrepareRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (user, open_book) = open_book_for_any_user(&state, &headers, book_id).await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let (op_id, spec) = {
+        let engine = open_book.engine.read().await;
+        let workflow = engine.get_workflow(body.workflow.workflow_deployment_id);
+        if !workflow.is_some_and(|workflow| {
+            workflow.metadata["kind"] == "opening_balance_import"
+                && workflow.workflow_id == body.workflow.workflow_id
+                && workflow.entity_id == subject_id
+        }) {
+            state.audit.record(
+                "authorization",
+                &user.email,
+                "denied",
+                "opening import preparation workflow context is required",
+            );
+            return Err(ApiError::unauthorized_api(
+                "opening import workflow role is required",
+            ));
+        }
+        if let Err(error) = engine.authorize_workflow_api(
+            user.user_id,
+            subject_id,
+            &body.workflow,
+            "prepare_opening_import_entities",
+        ) {
+            state.audit.record(
+                "authorization",
+                &user.email,
+                "denied",
+                "opening import preparation permission is required",
+            );
+            return Err(ApiError::from(error));
+        }
+        crate::opening_import::preparation_spec(&body, subject_id, &engine)
+            .map_err(ApiError::invalid_input)?
+    };
+    let namespace = spec.entity_namespace.clone();
+    let properties = spec.properties.clone();
+    mutate(&open_book, |engine| {
+        let workflow = engine
+            .get_workflow(body.workflow.workflow_deployment_id)
+            .ok_or_else(|| ledgerzero_engine::EngineError::invalid_input("unknown workflow"))?;
+        if workflow.metadata["kind"] != "opening_balance_import" {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "wrong workflow kind",
+            ));
+        }
+        engine.authorize_workflow_api(
+            user.user_id,
+            subject_id,
+            &body.workflow,
+            "prepare_opening_import_entities",
+        )?;
+        engine.prepare_import_properties(op_id, user.user_id, spec)
+    })
+    .await?;
+    let engine = open_book.engine.read().await;
+    let resolved: Vec<_> = properties.iter().map(|property| {
+        let entity = engine.find_import_entity(&namespace, &property.external_key).expect("prepared property exists");
+        serde_json::json!({"external_entity_key":property.external_key,"entity_id":entity.entity_id,"name":entity.name})
+    }).collect();
+    Ok(Json(
+        serde_json::json!({"preparation_id":op_id,"entity_namespace":namespace,"resolved_entities":resolved}),
+    ))
 }
 
 pub async fn reverse_entry(

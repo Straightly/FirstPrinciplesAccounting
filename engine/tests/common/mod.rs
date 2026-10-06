@@ -111,6 +111,7 @@ pub fn fixture() -> Fx {
                         account_type,
                         resource_type_id,
                         parent_account_id: None,
+                        associated_entity_id: None,
                         validation_rules: rules,
                         metadata: Value::Null,
                     },
@@ -191,6 +192,7 @@ pub fn debit(account_id: Uuid, amount: &str) -> NewLine {
     NewLine {
         line_id: id(),
         account_id,
+        attribution_entity_id: None,
         debit_amount: Some(amt(amount)),
         credit_amount: None,
         memo: None,
@@ -202,6 +204,7 @@ pub fn credit(account_id: Uuid, amount: &str) -> NewLine {
     NewLine {
         line_id: id(),
         account_id,
+        attribution_entity_id: None,
         debit_amount: None,
         credit_amount: Some(amt(amount)),
         memo: None,

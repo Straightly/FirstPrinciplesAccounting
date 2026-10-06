@@ -20,6 +20,48 @@ pub struct Entity {
     pub entity_id: Uuid,
     pub book_id: Uuid,
     pub name: String,
+    #[serde(default = "default_subject")]
+    pub is_subject: bool,
+    #[serde(default)]
+    pub category: EntityCategory,
+    #[serde(default)]
+    pub external_namespace: Option<String>,
+    #[serde(default)]
+    pub external_key: Option<String>,
+    pub created_at: TimestampMs,
+}
+
+fn default_subject() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EntityCategory {
+    Organization,
+    Person,
+    Property,
+    Unit,
+    #[default]
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EntityRelationshipKind {
+    Owns,
+    Contains,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRelationship {
+    pub relationship_id: Uuid,
+    pub book_id: Uuid,
+    pub from_entity_id: Uuid,
+    pub to_entity_id: Uuid,
+    pub kind: EntityRelationshipKind,
+    pub effective_from: Date,
+    pub effective_to: Option<Date>,
     pub created_at: TimestampMs,
 }
 
@@ -96,6 +138,8 @@ pub struct Account {
     pub account_id: Uuid,
     pub chart_id: Uuid,
     pub entity_id: Uuid,
+    #[serde(default)]
+    pub associated_entity_id: Option<Uuid>,
     pub name: String,
     pub code: Option<String>,
     pub account_type: AccountType,
@@ -234,6 +278,8 @@ pub struct Role {
 pub struct JournalLine {
     pub line_id: Uuid,
     pub account_id: Uuid,
+    #[serde(default)]
+    pub attribution_entity_id: Option<Uuid>,
     pub debit_amount: Option<Amount>,
     pub credit_amount: Option<Amount>,
     pub memo: Option<String>,
@@ -278,6 +324,14 @@ pub struct JournalEntry {
 pub enum EventPayload {
     EntityCreated {
         entity: Entity,
+    },
+    EntityRelationshipCreated {
+        relationship: EntityRelationship,
+    },
+    ImportEntitiesPrepared {
+        preparation_id: Uuid,
+        entities: Vec<Entity>,
+        relationships: Vec<EntityRelationship>,
     },
     ResourceTypeCreated {
         resource_type: ResourceType,
@@ -344,6 +398,8 @@ impl EventPayload {
     pub fn event_type(&self) -> EventType {
         match self {
             EventPayload::EntityCreated { .. }
+            | EventPayload::EntityRelationshipCreated { .. }
+            | EventPayload::ImportEntitiesPrepared { .. }
             | EventPayload::ResourceTypeCreated { .. }
             | EventPayload::ChartCreated { .. }
             | EventPayload::AccountCreated { .. }
@@ -366,6 +422,10 @@ impl EventPayload {
     pub fn outcome_id(&self) -> Uuid {
         match self {
             EventPayload::EntityCreated { entity } => entity.entity_id,
+            EventPayload::EntityRelationshipCreated { relationship } => {
+                relationship.relationship_id
+            }
+            EventPayload::ImportEntitiesPrepared { preparation_id, .. } => *preparation_id,
             EventPayload::ResourceTypeCreated { resource_type } => resource_type.resource_type_id,
             EventPayload::ChartCreated { chart, .. } => chart.chart_id,
             EventPayload::AccountCreated { account } => account.account_id,

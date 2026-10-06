@@ -45,7 +45,14 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/books/{book_id}/close", post(books_api::close_book))
         .route("/books/{book_id}/backup", post(books_api::backup_book))
-        .route("/books/{book_id}/entities", get(books_api::list_entities))
+        .route(
+            "/books/{book_id}/entities",
+            get(books_api::list_entities).post(books_api::create_referenced_entity),
+        )
+        .route(
+            "/books/{book_id}/entity-relationships",
+            get(books_api::list_entity_relationships).post(books_api::create_entity_relationship),
+        )
         .route("/books/{book_id}/users", get(books_api::list_users))
         .route(
             "/books/{book_id}/resource-types",
@@ -102,6 +109,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/books/{book_id}/opening-import",
             post(books_api::import_opening_balances),
+        )
+        .route(
+            "/books/{book_id}/opening-import/prepare-identities",
+            post(books_api::prepare_opening_import_identities),
         )
         .route("/books/{book_id}/audit-log", get(books_api::get_audit_log))
         .route(

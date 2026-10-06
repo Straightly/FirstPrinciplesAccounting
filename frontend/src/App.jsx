@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "./api.js";
 import OwnerWorkspace from "./OwnerWorkspace.jsx";
+import EntitySetup from "./EntitySetup.jsx";
 
 function Button({ children, kind = "primary", ...props }) {
   return <button className={`button ${kind === "primary" ? "" : kind}`} {...props}>{children}</button>;
@@ -138,6 +139,7 @@ export default function App() {
         {message && <div className="message">{message}</div>}
         {error && <div className="error">{error}</div>}
         <MyWorkflows book={selectedBook} workflows={workflows} loading={loadingWorkflows} />
+        <EntitySetup book={selectedBook} refreshEpoch={refreshEpoch} setMessage={setMessage} setError={setError} />
         <OwnerWorkspace me={me} books={books || []} book={selectedBook} isBookOwner={isBookOwner} refreshEpoch={refreshEpoch} onChanged={refreshAll} setMessage={setMessage} setError={setError} selectBook={setSelectedBookId} />
       </main>
     </div>

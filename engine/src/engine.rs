@@ -73,6 +73,8 @@ pub struct NewAccount {
     pub resource_type_id: Uuid,
     pub parent_account_id: Option<Uuid>,
     #[serde(default)]
+    pub associated_entity_id: Option<Uuid>,
+    #[serde(default)]
     pub validation_rules: Value,
     #[serde(default)]
     pub metadata: Value,
@@ -97,6 +99,8 @@ pub struct NewPeriod {
 pub struct NewLine {
     pub line_id: Uuid,
     pub account_id: Uuid,
+    #[serde(default)]
+    pub attribution_entity_id: Option<Uuid>,
     pub debit_amount: Option<Amount>,
     pub credit_amount: Option<Amount>,
     pub memo: Option<String>,
@@ -170,6 +174,35 @@ pub struct NewRole {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NewReferencedEntity {
+    pub name: String,
+    pub category: EntityCategory,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NewEntityRelationship {
+    pub from_entity_id: Uuid,
+    pub to_entity_id: Uuid,
+    pub kind: EntityRelationshipKind,
+    pub effective_from: Date,
+    pub effective_to: Option<Date>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImportPropertyIdentity {
+    pub external_key: String,
+    pub name: String,
+    pub effective_from: Date,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PrepareImportProperties {
+    pub subject_id: Uuid,
+    pub entity_namespace: String,
+    pub properties: Vec<ImportPropertyIdentity>,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +290,7 @@ pub struct EngineState {
     book_id: Uuid,
     log: Vec<EventRecord>,
     entities: BTreeMap<Uuid, Entity>,
+    relationships: BTreeMap<Uuid, EntityRelationship>,
     resource_types: BTreeMap<Uuid, ResourceType>,
     charts: BTreeMap<Uuid, Chart>,
     accounts: BTreeMap<Uuid, Account>,
@@ -278,6 +312,7 @@ impl EngineState {
             book_id,
             log: Vec::new(),
             entities: BTreeMap::new(),
+            relationships: BTreeMap::new(),
             resource_types: BTreeMap::new(),
             charts: BTreeMap::new(),
             accounts: BTreeMap::new(),
@@ -324,6 +359,23 @@ impl EngineState {
         match &record.payload {
             EventPayload::EntityCreated { entity } => {
                 self.entities.insert(entity.entity_id, entity.clone());
+            }
+            EventPayload::EntityRelationshipCreated { relationship } => {
+                self.relationships
+                    .insert(relationship.relationship_id, relationship.clone());
+            }
+            EventPayload::ImportEntitiesPrepared {
+                entities,
+                relationships,
+                ..
+            } => {
+                for entity in entities {
+                    self.entities.insert(entity.entity_id, entity.clone());
+                }
+                for relationship in relationships {
+                    self.relationships
+                        .insert(relationship.relationship_id, relationship.clone());
+                }
             }
             EventPayload::ResourceTypeCreated { resource_type } => {
                 self.resource_types
@@ -548,15 +600,8 @@ impl AccountingEngine {
 
     // -- reference mutations --------------------------------------------------
 
-    /// Impl Spec §2.8/§2.9 (Impl Plan M7): a book has exactly one entity —
-    /// its encryption key and owner authority are a security boundary, and
-    /// letting several legally distinct entities share one book would let a
-    /// key compromise or an owner's blanket authority reach all of them.
-    /// Related legal entities get their own books instead, linked via
-    /// `create_sub_book` and combined only through read-only consolidation.
-    /// Callers needing multiple related entities should use that mechanism,
-    /// not a second call here — which this rejects structurally, not just
-    /// by removing the client-facing route.
+    /// Book bootstrap creates exactly one accounting subject. Referenced
+    /// identities use `create_referenced_entity` and cannot own a chart.
     pub fn create_entity(
         &mut self,
         op_id: Uuid,
@@ -569,7 +614,7 @@ impl AccountingEngine {
         }
         if !self.state.entities.is_empty() {
             return Err(EngineError::invalid_input(
-                "a book has exactly one entity (Impl Plan M7); use create_sub_book for related legal entities",
+                "the book already has its accounting subject",
             ));
         }
         if name.trim().is_empty() {
@@ -579,6 +624,10 @@ impl AccountingEngine {
             entity_id: Uuid::new_v4(),
             book_id: self.state.book_id,
             name: name.to_string(),
+            is_subject: true,
+            category: EntityCategory::Other,
+            external_namespace: None,
+            external_key: None,
             created_at: self.clock.now_ms(),
         };
         Ok(self.record(
@@ -586,6 +635,256 @@ impl AccountingEngine {
             actor,
             request,
             EventPayload::EntityCreated { entity },
+        ))
+    }
+
+    fn require_subject(&self, entity_id: Uuid) -> Result<(), EngineError> {
+        match self.state.entities.get(&entity_id) {
+            Some(entity) if entity.is_subject => Ok(()),
+            _ => Err(EngineError::invalid_input(
+                "entity is not this book's accounting subject",
+            )),
+        }
+    }
+
+    pub fn create_referenced_entity(
+        &mut self,
+        op_id: Uuid,
+        actor: Uuid,
+        spec: NewReferencedEntity,
+    ) -> Result<Uuid, EngineError> {
+        let request = json!({"op":"create_referenced_entity","spec":spec});
+        if let Some(done) = self.check_idempotency(op_id, &request)? {
+            return Ok(done);
+        }
+        if !self.state.entities.values().any(|entity| entity.is_subject) {
+            return Err(EngineError::invalid_input("book has no accounting subject"));
+        }
+        if spec.name.trim().is_empty() || spec.name.len() > 200 {
+            return Err(EngineError::invalid_input(
+                "entity name must be 1-200 characters",
+            ));
+        }
+        let entity = Entity {
+            entity_id: Uuid::new_v4(),
+            book_id: self.state.book_id,
+            name: spec.name.trim().to_string(),
+            is_subject: false,
+            category: spec.category,
+            external_namespace: None,
+            external_key: None,
+            created_at: self.clock.now_ms(),
+        };
+        Ok(self.record(
+            op_id,
+            actor,
+            request,
+            EventPayload::EntityCreated { entity },
+        ))
+    }
+
+    pub fn find_import_entity(&self, namespace: &str, key: &str) -> Option<&Entity> {
+        self.state.entities.values().find(|entity| {
+            entity.external_namespace.as_deref() == Some(namespace)
+                && entity.external_key.as_deref() == Some(key)
+        })
+    }
+
+    /// A single event makes preparation all-or-nothing, including on storage replay.
+    pub fn prepare_import_properties(
+        &mut self,
+        op_id: Uuid,
+        actor: Uuid,
+        spec: PrepareImportProperties,
+    ) -> Result<Uuid, EngineError> {
+        let request = json!({"op":"prepare_import_properties","spec":spec});
+        if let Some(done) = self.check_idempotency(op_id, &request)? {
+            return Ok(done);
+        }
+        self.require_subject(spec.subject_id)?;
+        let valid_key = |value: &str| {
+            value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase())
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                })
+        };
+        if !valid_key(&spec.entity_namespace)
+            || spec.entity_namespace.len() > 120
+            || spec.properties.is_empty()
+        {
+            return Err(EngineError::invalid_input(
+                "invalid import identity namespace or empty property list",
+            ));
+        }
+        let mut entities = Vec::new();
+        let mut relationships = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for property in &spec.properties {
+            if !valid_key(&property.external_key)
+                || !seen.insert(&property.external_key)
+                || property.name.trim().is_empty()
+                || property.name.len() > 200
+            {
+                return Err(EngineError::invalid_input(
+                    "invalid or duplicate import property",
+                ));
+            }
+            let entity_id = if let Some(existing) =
+                self.find_import_entity(&spec.entity_namespace, &property.external_key)
+            {
+                if existing.is_subject
+                    || existing.category != EntityCategory::Property
+                    || existing.name != property.name
+                {
+                    return Err(EngineError::invalid_input(
+                        "import identity key conflicts with an existing entity",
+                    ));
+                }
+                existing.entity_id
+            } else {
+                let entity = Entity {
+                    entity_id: Uuid::new_v4(),
+                    book_id: self.state.book_id,
+                    name: property.name.clone(),
+                    is_subject: false,
+                    category: EntityCategory::Property,
+                    external_namespace: Some(spec.entity_namespace.clone()),
+                    external_key: Some(property.external_key.clone()),
+                    created_at: self.clock.now_ms(),
+                };
+                let id = entity.entity_id;
+                entities.push(entity);
+                id
+            };
+            let existing_relationship = self.state.relationships.values().find(|relationship| {
+                relationship.to_entity_id == entity_id
+                    && relationship.kind == EntityRelationshipKind::Owns
+            });
+            if let Some(existing) = existing_relationship {
+                if existing.from_entity_id != spec.subject_id
+                    || existing.effective_from != property.effective_from
+                    || existing.effective_to.is_some()
+                {
+                    return Err(EngineError::invalid_input(
+                        "import ownership relationship conflicts with existing record",
+                    ));
+                }
+            } else {
+                relationships.push(EntityRelationship {
+                    relationship_id: Uuid::new_v4(),
+                    book_id: self.state.book_id,
+                    from_entity_id: spec.subject_id,
+                    to_entity_id: entity_id,
+                    kind: EntityRelationshipKind::Owns,
+                    effective_from: property.effective_from.clone(),
+                    effective_to: None,
+                    created_at: self.clock.now_ms(),
+                });
+            }
+        }
+        Ok(self.record(
+            op_id,
+            actor,
+            request,
+            EventPayload::ImportEntitiesPrepared {
+                preparation_id: op_id,
+                entities,
+                relationships,
+            },
+        ))
+    }
+
+    pub fn create_entity_relationship(
+        &mut self,
+        op_id: Uuid,
+        actor: Uuid,
+        spec: NewEntityRelationship,
+    ) -> Result<Uuid, EngineError> {
+        let request = json!({"op":"create_entity_relationship","spec":spec});
+        if let Some(done) = self.check_idempotency(op_id, &request)? {
+            return Ok(done);
+        }
+        let from = self
+            .state
+            .entities
+            .get(&spec.from_entity_id)
+            .ok_or_else(|| EngineError::invalid_input("unknown relationship source"))?;
+        let to = self
+            .state
+            .entities
+            .get(&spec.to_entity_id)
+            .ok_or_else(|| EngineError::invalid_input("unknown relationship target"))?;
+        if from.entity_id == to.entity_id
+            || from.book_id != self.state.book_id
+            || to.book_id != self.state.book_id
+        {
+            return Err(EngineError::invalid_input(
+                "relationship endpoints must be distinct entities in this book",
+            ));
+        }
+        match spec.kind {
+            EntityRelationshipKind::Owns
+                if !from.is_subject || to.is_subject || to.category != EntityCategory::Property =>
+            {
+                return Err(EngineError::invalid_input(
+                    "OWNS must link the book subject to a property",
+                ))
+            }
+            EntityRelationshipKind::Contains
+                if from.category != EntityCategory::Property
+                    || to.category != EntityCategory::Unit =>
+            {
+                return Err(EngineError::invalid_input(
+                    "CONTAINS must link a property to a unit",
+                ))
+            }
+            _ => {}
+        }
+        if spec
+            .effective_to
+            .as_ref()
+            .is_some_and(|end| end < &spec.effective_from)
+        {
+            return Err(EngineError::invalid_input(
+                "relationship end precedes start",
+            ));
+        }
+        if self.state.relationships.values().any(|existing| {
+            existing.to_entity_id == spec.to_entity_id
+                && existing.kind == spec.kind
+                && existing
+                    .effective_to
+                    .as_ref()
+                    .is_none_or(|end| end >= &spec.effective_from)
+                && spec
+                    .effective_to
+                    .as_ref()
+                    .is_none_or(|end| end >= &existing.effective_from)
+        }) {
+            return Err(EngineError::invalid_input(
+                "overlapping relationship already exists",
+            ));
+        }
+        let relationship = EntityRelationship {
+            relationship_id: Uuid::new_v4(),
+            book_id: self.state.book_id,
+            from_entity_id: spec.from_entity_id,
+            to_entity_id: spec.to_entity_id,
+            kind: spec.kind,
+            effective_from: spec.effective_from,
+            effective_to: spec.effective_to,
+            created_at: self.clock.now_ms(),
+        };
+        Ok(self.record(
+            op_id,
+            actor,
+            request,
+            EventPayload::EntityRelationshipCreated { relationship },
         ))
     }
 
@@ -648,9 +947,7 @@ impl AccountingEngine {
         if let Some(done) = self.check_idempotency(op_id, &request)? {
             return Ok(done);
         }
-        if !self.state.entities.contains_key(&spec.entity_id) {
-            return Err(EngineError::invalid_input("unknown entity"));
-        }
+        self.require_subject(spec.entity_id)?;
         if spec.name.trim().is_empty() {
             return Err(EngineError::invalid_input("chart name must not be empty"));
         }
@@ -746,6 +1043,7 @@ impl AccountingEngine {
                     account_id: account_ids[index],
                     chart_id,
                     entity_id: spec.entity_id,
+                    associated_entity_id: None,
                     name: name.to_string(),
                     code: None,
                     account_type,
@@ -856,6 +1154,7 @@ impl AccountingEngine {
                     account_id: new_account_id,
                     chart_id: new_chart_id,
                     entity_id: source.entity_id,
+                    associated_entity_id: a.associated_entity_id,
                     name: a.name.clone(),
                     code: a.code.clone(),
                     account_type: a.account_type,
@@ -950,11 +1249,22 @@ impl AccountingEngine {
                 None => return Err(EngineError::invalid_input("unknown parent account")),
             }
         }
+        if let Some(entity_id) = spec.associated_entity_id {
+            match self.state.entities.get(&entity_id) {
+                Some(entity) if !entity.is_subject && entity.book_id == self.state.book_id => {}
+                _ => {
+                    return Err(EngineError::invalid_input(
+                        "associated entity must be a referenced entity in this book",
+                    ))
+                }
+            }
+        }
         parse_validation_rules(&spec.validation_rules)?;
         let account = Account {
             account_id: Uuid::new_v4(),
             chart_id: spec.chart_id,
             entity_id: chart.entity_id,
+            associated_entity_id: spec.associated_entity_id,
             name: spec.name,
             code: spec.code,
             account_type: spec.account_type,
@@ -1066,9 +1376,7 @@ impl AccountingEngine {
         if let Some(done) = self.check_idempotency(op_id, &request)? {
             return Ok(done);
         }
-        if !self.state.entities.contains_key(&spec.entity_id) {
-            return Err(EngineError::invalid_input("unknown entity"));
-        }
+        self.require_subject(spec.entity_id)?;
         if spec.end_date < spec.start_date {
             return Err(EngineError::invalid_input(
                 "period end_date must be >= start_date",
@@ -1215,9 +1523,7 @@ impl AccountingEngine {
         if let Some(done) = self.check_idempotency(spec.workflow_deployment_id, &request)? {
             return Ok(done);
         }
-        if !self.state.entities.contains_key(&spec.entity_id) {
-            return Err(EngineError::invalid_input("unknown entity"));
-        }
+        self.require_subject(spec.entity_id)?;
         if spec.workflow_name.trim().is_empty() {
             return Err(EngineError::invalid_input(
                 "workflow_name must not be empty",
@@ -1315,20 +1621,28 @@ impl AccountingEngine {
         if let Some(done) = self.check_idempotency(op_id, &request)? {
             return Ok(done);
         }
-        if !self.state.entities.contains_key(&spec.entity_id) {
-            return Err(EngineError::invalid_input("unknown entity"));
-        }
+        self.require_subject(spec.entity_id)?;
         if spec.name.trim().is_empty() {
             return Err(EngineError::invalid_input("role name must not be empty"));
         }
-        if spec
-            .permissions
-            .iter()
-            .any(|permission| permission != "list_accounts")
-            || spec.permissions.len() > 1
+        let allowed = [
+            "list_accounts",
+            "list_entities",
+            "list_charts",
+            "list_resource_types",
+            "create_entity",
+            "create_entity_relationship",
+            "create_account",
+        ];
+        let unique: std::collections::BTreeSet<_> = spec.permissions.iter().collect();
+        if unique.len() != spec.permissions.len()
+            || spec
+                .permissions
+                .iter()
+                .any(|permission| !allowed.contains(&permission.as_str()))
         {
             return Err(EngineError::invalid_input(
-                "role permissions must contain list_accounts at most once",
+                "role has a duplicate or unknown API permission",
             ));
         }
         if self
@@ -1461,7 +1775,7 @@ impl AccountingEngine {
     /// in its `backend_api_calls`, and `user_id` must hold a role granting
     /// this workflow. No capability tokens — every field is re-checked
     /// against server-side state on every call.
-    fn authorize_workflow_api(
+    pub fn authorize_workflow_api(
         &self,
         user_id: Uuid,
         entity_id: Uuid,
@@ -1555,6 +1869,7 @@ impl AccountingEngine {
                 debit_amount: line.credit_amount, // sides swapped
                 credit_amount: line.debit_amount,
                 memo: line.memo.clone(),
+                attribution_entity_id: line.attribution_entity_id,
                 metadata: line.metadata.clone(),
             })
             .collect();
@@ -1646,9 +1961,7 @@ impl AccountingEngine {
                 }
             }
         }
-        if !self.state.entities.contains_key(&new.entity_id) {
-            return Err(EngineError::invalid_input("unknown entity"));
-        }
+        self.require_subject(new.entity_id)?;
         // Entry-recorded prices: well-formed, no duplicate or two-way pairs.
         let mut price_dirs = std::collections::BTreeSet::new();
         for price in &new.prices {
@@ -1696,6 +2009,20 @@ impl AccountingEngine {
                     ErrorCode::ChartMismatch,
                     "line account belongs to a different entity than the entry",
                 ));
+            }
+            if let Some(entity_id) = line.attribution_entity_id {
+                if !self.state.entities.contains_key(&entity_id) {
+                    return Err(EngineError::invalid_input(
+                        "line attribution entity is not in this book",
+                    ));
+                }
+            }
+            if let Some(associated) = account.associated_entity_id {
+                if line.attribution_entity_id != Some(associated) {
+                    return Err(EngineError::invalid_input(
+                        "line attribution must match the dedicated account entity",
+                    ));
+                }
             }
         }
 
@@ -1803,6 +2130,7 @@ impl AccountingEngine {
                 .map(|l| JournalLine {
                     line_id: l.line_id,
                     account_id: l.account_id,
+                    attribution_entity_id: l.attribution_entity_id,
                     debit_amount: l.debit_amount,
                     credit_amount: l.credit_amount,
                     memo: l.memo.clone(),
@@ -1876,6 +2204,14 @@ impl AccountingEngine {
 
     pub fn list_entities(&self) -> Vec<&Entity> {
         self.state.entities.values().collect()
+    }
+
+    pub fn get_entity(&self, entity_id: Uuid) -> Option<&Entity> {
+        self.state.entities.get(&entity_id)
+    }
+
+    pub fn list_entity_relationships(&self) -> Vec<&EntityRelationship> {
+        self.state.relationships.values().collect()
     }
 
     pub fn list_resource_types(&self) -> Vec<&ResourceType> {
@@ -2206,6 +2542,7 @@ impl AccountingEngine {
                     .map(|l| NewLine {
                         line_id: l.line_id,
                         account_id: l.account_id,
+                        attribution_entity_id: l.attribution_entity_id,
                         debit_amount: l.debit_amount,
                         credit_amount: l.credit_amount,
                         memo: l.memo.clone(),

@@ -126,8 +126,10 @@ async fn create_book(app: &Router, cookie: &str) -> (Uuid, Uuid) {
 }
 
 async fn id_field(response: axum::response::Response) -> Uuid {
-    assert_eq!(response.status(), StatusCode::OK, "expected 200 OK");
-    Uuid::parse_str(body_json(response).await["id"].as_str().unwrap()).unwrap()
+    let status = response.status();
+    let body = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "expected 200 OK: {body}");
+    Uuid::parse_str(body["id"].as_str().unwrap()).unwrap()
 }
 
 #[tokio::test]
@@ -184,6 +186,124 @@ async fn book_owner_can_assign_role_to_self_but_other_user_cannot_self_grant() {
     )
     .await;
     assert_eq!(ambiguous.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn delegated_entity_and_account_setup_requires_each_explicit_permission() {
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let app = app_over(books_dir.path(), artifacts_dir.path());
+    let (owner_cookie, _) = dev_login(&app, OWNER).await;
+    let (book_id, subject_id, _, _) = setup_book(&app, &owner_cookie).await;
+    let owner_charts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/charts?entity_id={subject_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let chart_id = Uuid::parse_str(owner_charts[0]["chart_id"].as_str().unwrap()).unwrap();
+    let owner_resources = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/resource-types"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let usd = Uuid::parse_str(owner_resources[0]["resource_type_id"].as_str().unwrap()).unwrap();
+    let (employee_cookie, employee_id) = dev_login(&app, EMPLOYEE).await;
+    let entities = format!("/api/books/{book_id}/entities");
+    let relations = format!("/api/books/{book_id}/entity-relationships");
+    let accounts = format!("/api/books/{book_id}/accounts");
+    let property_request =
+        json!({"op_id": Uuid::new_v4(), "name": "Elm House", "category": "PROPERTY"});
+    assert_eq!(
+        get(&app, &entities, &employee_cookie).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        post(&app, &entities, &employee_cookie, property_request.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let role_id = id_field(post(&app, &format!("/api/books/{book_id}/roles"), &owner_cookie,
+        json!({"op_id": Uuid::new_v4(), "entity_id": subject_id, "name": "Entity preparer", "description": null,
+            "permissions": ["list_entities", "create_entity", "create_entity_relationship", "list_charts", "list_resource_types", "list_accounts", "create_account"]})).await).await;
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/roles/{role_id}/users"),
+            &owner_cookie,
+            json!({"op_id": Uuid::new_v4(), "user_id": employee_id})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let property =
+        id_field(post(&app, &entities, &employee_cookie, property_request.clone()).await).await;
+    assert_eq!(
+        id_field(post(&app, &entities, &employee_cookie, property_request).await).await,
+        property
+    );
+    assert_eq!(
+        body_json(get(&app, &entities, &employee_cookie).await)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let relation = json!({"op_id": Uuid::new_v4(), "from_entity_id": subject_id,
+        "to_entity_id": property, "kind": "OWNS", "effective_from": "2026-01-01", "effective_to": null});
+    id_field(post(&app, &relations, &employee_cookie, relation).await).await;
+    assert_eq!(
+        body_json(get(&app, &relations, &employee_cookie).await)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/charts?entity_id={subject_id}"),
+            &employee_cookie
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/resource-types"),
+            &employee_cookie
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let account = json!({"op_id": Uuid::new_v4(), "chart_id": chart_id, "name": "Elm property cash",
+        "code": null, "account_type": "ASSET", "resource_type_id": usd,
+        "parent_account_id": null, "associated_entity_id": property,
+        "validation_rules": {}, "metadata": {}});
+    id_field(post(&app, &accounts, &employee_cookie, account).await).await;
+    let bad = json!({"op_id": Uuid::new_v4(), "chart_id": chart_id, "name": "Bad property cash",
+        "code": null, "account_type": "ASSET", "resource_type_id": usd,
+        "parent_account_id": null, "associated_entity_id": Uuid::new_v4(),
+        "validation_rules": {}, "metadata": {}});
+    assert_eq!(
+        post(&app, &accounts, &employee_cookie, bad).await.status(),
+        StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
@@ -1095,6 +1215,391 @@ async fn opening_import_is_role_scoped_atomic_and_replay_safe() {
     )
     .await;
     assert_eq!(entries.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn v11_import_prepares_stable_properties_then_posts_attributed_entry() {
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let app = app_over(books_dir.path(), artifacts_dir.path());
+    let (owner_cookie, _) = dev_login(&app, OWNER).await;
+    let (book_id, subject_id, _cash, rent) = setup_book(&app, &owner_cookie).await;
+    let charts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/charts?entity_id={subject_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let chart_id = charts[0]["chart_id"].as_str().unwrap();
+    let resources = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/resource-types"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let usd = resources[0]["resource_type_id"].as_str().unwrap();
+    let deployment_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    write_artifact(artifacts_dir.path(), deployment_id);
+    id_field(post(&app, &format!("/api/books/{book_id}/workflows/deploy"), &owner_cookie,
+        json!({"workflow_deployment_id":deployment_id,"workflow_id":workflow_id,"entity_id":subject_id,
+            "workflow_name":"V11 import","backend_api_calls":["prepare_opening_import_entities","post_entry"],
+            "metadata":{"kind":"opening_balance_import"}})).await).await;
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/roles?entity_id={subject_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let role_id = roles[0]["role_id"].as_str().unwrap();
+    let (employee_cookie, employee_id) = dev_login(&app, EMPLOYEE).await;
+    let package = json!({
+        "schema_version":"1.1", "import_id":Uuid::new_v4().to_string(),
+        "source_balance_date":"2026-02-09", "opening_entry_date":"2026-02-10",
+        "declared_accounting_method":"cash", "declared_balance_basis":"Reviewed fixture",
+        "resource_codes":["USD"], "entity_namespace":"zag-properties",
+        "related_entities":[{"external_entity_key":"elm-house","name":"Elm House","category":"PROPERTY",
+            "relationship":"OWNS","effective_from":"2026-01-01"}],
+        "source_material":[{"source_id":"fixture","sha256":"a".repeat(64),"label":"Fixture"}],
+        "balance_rows":[
+            {"external_account_key":"property.asset","proposed_account_name":"Elm asset","proposed_account_type":"ASSET",
+                "resource_code":"USD","debit":"10.00","credit":"0.00","source_id":"fixture",
+                "source_reference":null,"property_reference":"Elm House","note":null,"attribution_entity_key":"elm-house"},
+            {"external_account_key":"rent","proposed_account_name":"Rent Expense","proposed_account_type":"EXPENSE",
+                "resource_code":"USD","debit":"0.00","credit":"10.00","source_id":"fixture",
+                "source_reference":null,"property_reference":null,"note":null,"attribution_entity_key":null}
+        ], "control_totals":{"USD":{"debit":"10.00","credit":"10.00"}}
+    });
+    let context = json!({"workflow_id":workflow_id,"workflow_deployment_id":deployment_id,"workflow_execution_id":Uuid::new_v4()});
+    let prepare_path = format!("/api/books/{book_id}/opening-import/prepare-identities");
+    let prep = json!({"file_content":package.to_string(),"chart_id":chart_id,"workflow":context});
+    assert_eq!(
+        post(&app, &prepare_path, &employee_cookie, prep.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/roles/{role_id}/users"),
+            &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"user_id":employee_id})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/entities"),
+            &employee_cookie,
+            json!({"op_id":Uuid::new_v4(),"name":"No generic create","category":"PROPERTY"})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut malformed = package.clone();
+    malformed["control_totals"]["USD"]["debit"] = json!("11.00");
+    assert_eq!(
+        post(
+            &app,
+            &prepare_path,
+            &employee_cookie,
+            json!({"file_content":malformed.to_string(),"chart_id":chart_id,"workflow":context})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let before = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/entities"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(before.as_array().unwrap().len(), 1);
+    let first = body_json(post(&app, &prepare_path, &employee_cookie, prep.clone()).await).await;
+    let property_id = first["resolved_entities"][0]["entity_id"].as_str().unwrap();
+    let second = body_json(post(&app, &prepare_path, &employee_cookie, prep).await).await;
+    assert_eq!(second["resolved_entities"][0]["entity_id"], property_id);
+    let mut revised = package.clone();
+    revised["import_id"] = json!(Uuid::new_v4().to_string());
+    let revised_prep =
+        json!({"file_content":revised.to_string(),"chart_id":chart_id,"workflow":context});
+    let reused = body_json(post(&app, &prepare_path, &employee_cookie, revised_prep).await).await;
+    assert_eq!(reused["resolved_entities"][0]["entity_id"], property_id);
+    let mut conflicting = package.clone();
+    conflicting["import_id"] = json!(Uuid::new_v4().to_string());
+    conflicting["related_entities"][0]["name"] = json!("Wrong identity");
+    assert_eq!(
+        post(
+            &app,
+            &prepare_path,
+            &employee_cookie,
+            json!({"file_content":conflicting.to_string(),"chart_id":chart_id,"workflow":context})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let import_path = format!("/api/books/{book_id}/opening-import");
+    let missing = json!({"file_content":package.to_string(),"chart_id":chart_id,
+        "account_mappings":{"property.asset":Uuid::new_v4(),"rent":rent},"workflow":context});
+    assert_eq!(
+        post(&app, &import_path, &employee_cookie, missing)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let property_account = id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/accounts"),
+            &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"chart_id":chart_id,"name":"Elm asset","code":null,
+            "account_type":"ASSET","resource_type_id":usd,"parent_account_id":null,
+            "associated_entity_id":property_id,"validation_rules":{},"metadata":{}}),
+        )
+        .await,
+    )
+    .await;
+    let posting = json!({"file_content":package.to_string(),"chart_id":chart_id,
+        "account_mappings":{"property.asset":property_account,"rent":rent},"workflow":context});
+    let entry_id =
+        id_field(post(&app, &import_path, &employee_cookie, posting.clone()).await).await;
+    assert_eq!(
+        id_field(post(&app, &import_path, &employee_cookie, posting).await).await,
+        entry_id
+    );
+    let entries = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/entries?entity_id={subject_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let entry = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["entry_id"] == entry_id.to_string())
+        .unwrap();
+    assert_eq!(entry["lines"][0]["attribution_entity_id"], property_id);
+}
+
+#[tokio::test]
+async fn zag_v11_draft_posts_to_a_disposable_book_when_fixture_path_is_set() {
+    let Ok(path) = std::env::var("FPA_ZAG_V11_DRAFT") else {
+        return;
+    };
+    let file_content = std::fs::read_to_string(path).unwrap();
+    let package: Value = serde_json::from_str(&file_content).unwrap();
+    assert_eq!(package["schema_version"], "1.1");
+    assert_eq!(package["related_entities"].as_array().unwrap().len(), 6);
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let app = app_over(books_dir.path(), artifacts_dir.path());
+    let (owner_cookie, _) = dev_login(&app, OWNER).await;
+    let (book_id, subject_id) = create_book(&app, &owner_cookie).await;
+    let usd = id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/resource-types"),
+            &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"name":"US Dollar","kind":"CURRENCY","code":"USD",
+            "unit_of_measure":"USD","precision":2}),
+        )
+        .await,
+    )
+    .await;
+    let chart_id = id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/charts"),
+            &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"entity_id":subject_id,"name":"Zag staging chart",
+            "description":null,"activate":true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/periods"),
+            &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"entity_id":subject_id,"name":"January 2025",
+            "start_date":"2025-01-01","end_date":"2025-01-31"})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let deployment_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    write_artifact(artifacts_dir.path(), deployment_id);
+    id_field(post(&app, &format!("/api/books/{book_id}/workflows/deploy"), &owner_cookie,
+        json!({"workflow_deployment_id":deployment_id,"workflow_id":workflow_id,"entity_id":subject_id,
+            "workflow_name":"Zag staging import","backend_api_calls":["prepare_opening_import_entities","post_entry"],
+            "metadata":{"kind":"opening_balance_import"}})).await).await;
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/roles?entity_id={subject_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let role_id = roles[0]["role_id"].as_str().unwrap();
+    let (operator_cookie, operator_id) = dev_login(&app, EMPLOYEE).await;
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/roles/{role_id}/users"),
+            &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"user_id":operator_id})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let workflow = json!({"workflow_id":workflow_id,"workflow_deployment_id":deployment_id,"workflow_execution_id":Uuid::new_v4()});
+    let prepared_response = post(
+        &app,
+        &format!("/api/books/{book_id}/opening-import/prepare-identities"),
+        &operator_cookie,
+        json!({"file_content":file_content,"chart_id":chart_id,"workflow":workflow}),
+    )
+    .await;
+    let prepared_status = prepared_response.status();
+    let prepared = body_json(prepared_response).await;
+    assert_eq!(prepared_status, StatusCode::OK, "{prepared}");
+    let resolved = prepared["resolved_entities"].as_array().unwrap();
+    assert_eq!(resolved.len(), 6);
+    let by_key: std::collections::HashMap<_, _> = resolved
+        .iter()
+        .map(|item| {
+            (
+                item["external_entity_key"].as_str().unwrap(),
+                item["entity_id"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let mut mappings = serde_json::Map::new();
+    for row in package["balance_rows"].as_array().unwrap() {
+        let key = row["external_account_key"].as_str().unwrap();
+        let association = row["attribution_entity_key"]
+            .as_str()
+            .map(|key| by_key[key]);
+        let response = post(&app, &format!("/api/books/{book_id}/accounts"), &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"chart_id":chart_id,
+                "name":format!("{} [{key}]",row["proposed_account_name"].as_str().unwrap()),
+                "code":null,"account_type":row["proposed_account_type"],"resource_type_id":usd,
+                "parent_account_id":null,"associated_entity_id":association,"validation_rules":{},"metadata":{}})).await;
+        let status = response.status();
+        let body = body_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let account_id = body["id"].as_str().unwrap().to_owned();
+        mappings.insert(key.to_owned(), json!(account_id));
+    }
+    let post_response = post(&app, &format!("/api/books/{book_id}/opening-import"), &operator_cookie,
+        json!({"file_content":file_content,"chart_id":chart_id,"account_mappings":mappings,"workflow":workflow})).await;
+    let post_status = post_response.status();
+    let post_body = body_json(post_response).await;
+    assert_eq!(post_status, StatusCode::OK, "{post_body}");
+    let entry_id = post_body["id"].as_str().unwrap().to_owned();
+    let entries = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/entries?entity_id={subject_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let entry = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["entry_id"] == entry_id)
+        .unwrap();
+    assert_eq!(entry["lines"].as_array().unwrap().len(), 21);
+    assert_eq!(
+        entry["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|line| !line["attribution_entity_id"].is_null())
+            .count(),
+        18
+    );
+    let backup_location = tempfile::tempdir().unwrap();
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/backup"),
+            &owner_cookie,
+            json!({"location":backup_location.path().to_string_lossy()})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/close"),
+            &owner_cookie,
+            json!({})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/open"),
+            &owner_cookie,
+            json!({"passphrase":"correct horse battery staple"})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let reopened = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/entries?entity_id={subject_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert!(reopened
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["entry_id"] == entry_id));
 }
 
 #[tokio::test]

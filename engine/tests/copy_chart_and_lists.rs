@@ -72,6 +72,7 @@ fn copy_chart_duplicates_accounts_with_remapped_parents() {
                 account_type: AccountType::Asset,
                 resource_type_id: fx.usd,
                 parent_account_id: Some(parent),
+                associated_entity_id: None,
                 validation_rules: Value::Null,
                 metadata: Value::Null,
             },

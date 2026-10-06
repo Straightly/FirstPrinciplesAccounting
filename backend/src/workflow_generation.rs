@@ -79,7 +79,7 @@ pub async fn generate(
         json!({})
     };
     let required_inputs = if opening_import {
-        json!({"file_content":"json_file","account_mappings":"account_mapping"})
+        json!({"file_content":"json_file","account_mappings":"account_mapping","prepare_identities":"api_call"})
     } else {
         json!({
             "entry_date": "date",
@@ -95,13 +95,15 @@ pub async fn generate(
         "workflow_name": workflow_name,
         "description": description,
         "steps": if opening_import { json!([
-            {"kind":"form","collects":["Reviewed opening-balance JSON file", "Account mapping"]},
+            {"kind":"form","collects":["Reviewed opening-balance JSON file"]},
+            {"kind":"api_call","backend_api":"prepare_opening_import_entities"},
+            {"kind":"form","collects":["Account mapping"]},
             {"kind":"api_call","backend_api":"post_entry"}
         ]) } else { json!([
             {"kind": "form", "collects": ["Entry date", "Description", "Amount", "Direction", "Primary account", "Offset account", "Memo (optional)"]},
             {"kind": "api_call", "backend_api": "post_entry"}
         ]) },
-        "backend_api_calls": ["post_entry"],
+        "backend_api_calls": if opening_import { json!(["prepare_opening_import_entities", "post_entry"]) } else { json!(["post_entry"]) },
         "required_inputs": required_inputs,
         "metadata": metadata
     });
