@@ -940,3 +940,188 @@ async fn l4_browser_generation_deployment_and_email_assignment_lifecycle() {
     .await;
     assert_eq!(roles[0]["assigned_user_ids"][0], employee_id.to_string());
 }
+
+#[tokio::test]
+async fn opening_import_is_role_scoped_atomic_and_replay_safe() {
+    let books_dir = tempfile::tempdir().unwrap();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let app = app_over(books_dir.path(), artifacts_dir.path());
+    let (owner_cookie, _) = dev_login(&app, OWNER).await;
+    let (book_id, entity_id, cash, rent) = setup_book(&app, &owner_cookie).await;
+    let charts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/charts?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let chart_id = charts[0]["chart_id"].as_str().unwrap();
+    let deployment_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    write_artifact(artifacts_dir.path(), deployment_id);
+    id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/workflows/deploy"),
+            &owner_cookie,
+            json!({
+                "workflow_deployment_id": deployment_id, "workflow_id": workflow_id,
+                "entity_id": entity_id, "workflow_name": "Opening import",
+                "backend_api_calls": ["post_entry"], "metadata": {"kind":"opening_balance_import"}
+            }),
+        )
+        .await,
+    )
+    .await;
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/roles?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    let role_id = roles[0]["role_id"].as_str().unwrap();
+    let package = json!({
+        "schema_version":"1.0", "import_id":Uuid::new_v4().to_string(),
+        "source_balance_date":"2026-02-09", "opening_entry_date":"2026-02-10",
+        "declared_accounting_method":"cash", "declared_balance_basis":"Reviewed fixture",
+        "resource_codes":["USD"],
+        "source_material":[{"source_id":"fixture","sha256":"a".repeat(64),"label":"Test fixture"}],
+        "balance_rows":[
+            {"external_account_key":"cash","proposed_account_name":"Cash","proposed_account_type":"ASSET","resource_code":"USD","debit":"10.00","credit":"0","source_id":"fixture","source_reference":null,"property_reference":null,"note":null},
+            {"external_account_key":"rent","proposed_account_name":"Rent Expense","proposed_account_type":"EXPENSE","resource_code":"USD","debit":"0","credit":"10.00","source_id":"fixture","source_reference":null,"property_reference":null,"note":null}
+        ],
+        "control_totals":{"USD":{"debit":"10.00","credit":"10.00"}}
+    });
+    let request = json!({"file_content":package.to_string(),"chart_id":chart_id,
+        "account_mappings":{"cash":cash,"rent":rent},
+        "workflow":{"workflow_id":workflow_id,"workflow_deployment_id":deployment_id,"workflow_execution_id":Uuid::new_v4()}});
+    let path = format!("/api/books/{book_id}/opening-import");
+    assert_eq!(
+        post(&app, &path, &owner_cookie, request.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    id_field(
+        post(
+            &app,
+            &format!("/api/books/{book_id}/roles/{role_id}/users"),
+            &owner_cookie,
+            json!({"op_id":Uuid::new_v4(),"assign_to_self":true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        get(
+            &app,
+            &format!("{path}/context?workflow_deployment_id={deployment_id}"),
+            &owner_cookie
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let bypass = post(&app, &format!("/api/books/{book_id}/entries"), &owner_cookie, json!({
+        "entry_id":Uuid::new_v4(), "entity_id":entity_id, "entry_date":"2026-02-10",
+        "description":"bypass", "source":"WORKFLOW",
+        "workflow":{"workflow_id":workflow_id,"workflow_deployment_id":deployment_id,"workflow_execution_id":Uuid::new_v4()},
+        "lines":[
+            {"line_id":Uuid::new_v4(),"account_id":cash,"debit_amount":"10.00","credit_amount":null},
+            {"line_id":Uuid::new_v4(),"account_id":rent,"debit_amount":null,"credit_amount":"10.00"}
+        ]
+    })).await;
+    assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
+    let first = id_field(post(&app, &path, &owner_cookie, request.clone()).await).await;
+    assert_eq!(first.to_string(), package["import_id"].as_str().unwrap());
+    let replay = post(&app, &path, &owner_cookie, request.clone()).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(body_json(replay).await["id"], first.to_string());
+    let mut bad_package = package.clone();
+    bad_package["import_id"] = json!(Uuid::new_v4().to_string());
+    bad_package["balance_rows"][1]["credit"] = json!("9.00");
+    let mut bad_request = request.clone();
+    bad_request["file_content"] = json!(bad_package.to_string());
+    assert_eq!(
+        post(&app, &path, &owner_cookie, bad_request).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut unmapped_package = package.clone();
+    unmapped_package["import_id"] = json!(Uuid::new_v4().to_string());
+    let mut unmapped_request = request.clone();
+    unmapped_request["file_content"] = json!(unmapped_package.to_string());
+    unmapped_request["account_mappings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("rent");
+    assert_eq!(
+        post(&app, &path, &owner_cookie, unmapped_request)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let malformed_request = json!({"file_content":"{bad json", "chart_id":chart_id,
+        "account_mappings":{"cash":cash,"rent":rent},
+        "workflow":{"workflow_id":workflow_id,"workflow_deployment_id":deployment_id,"workflow_execution_id":Uuid::new_v4()}});
+    assert_eq!(
+        post(&app, &path, &owner_cookie, malformed_request)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut closed_period_package = package.clone();
+    closed_period_package["import_id"] = json!(Uuid::new_v4().to_string());
+    closed_period_package["opening_entry_date"] = json!("2026-03-01");
+    let mut closed_period_request = request;
+    closed_period_request["file_content"] = json!(closed_period_package.to_string());
+    assert_eq!(
+        post(&app, &path, &owner_cookie, closed_period_request)
+            .await
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let entries = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book_id}/entries?entity_id={entity_id}"),
+            &owner_cookie,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(entries.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn opening_import_generator_packages_the_specific_spa_and_metadata() {
+    let artifacts = tempfile::tempdir().unwrap();
+    let frontend = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(frontend.path().join("workflow")).unwrap();
+    std::fs::write(
+        frontend.path().join("workflow/workflow-react.js"),
+        "export const React = {};",
+    )
+    .unwrap();
+    let generated = ledgerzero_backend::workflow_generation::generate(
+        artifacts.path().to_str().unwrap(),
+        frontend.path().to_str().unwrap(),
+        ledgerzero_backend::workflow_generation::GenerateWorkflowArtifactRequest {
+            workflow_name: "Opening import".into(),
+            description: None,
+            kind: Some("opening_balance_import".into()),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(generated.metadata["kind"], "opening_balance_import");
+    let app_js =
+        std::fs::read_to_string(std::path::Path::new(&generated.artifact_path).join("code/app.js"))
+            .unwrap();
+    assert!(app_js.contains("/opening-import"));
+    assert!(app_js.contains(&generated.workflow_id.to_string()));
+}

@@ -14,6 +14,8 @@ use uuid::Uuid;
 pub struct GenerateWorkflowArtifactRequest {
     pub workflow_name: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +26,7 @@ pub struct WorkflowArtifactSummary {
     pub description: Option<String>,
     pub backend_api_calls: Vec<String>,
     pub required_inputs: Value,
+    pub metadata: Value,
     pub artifact_path: String,
 }
 
@@ -41,6 +44,12 @@ fn validate_request(request: &GenerateWorkflowArtifactRequest) -> Result<(), Str
     }
     if request.description.as_deref().unwrap_or("").len() > 1000 {
         return Err("workflow description must be 1000 characters or fewer".to_string());
+    }
+    if !matches!(
+        request.kind.as_deref().unwrap_or("journal"),
+        "journal" | "opening_balance_import"
+    ) {
+        return Err("unsupported workflow artifact kind".to_string());
     }
     Ok(())
 }
@@ -63,24 +72,38 @@ pub async fn generate(
         .description
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let required_inputs = json!({
-        "entry_date": "date",
-        "description": "text",
-        "amount": "number",
-        "direction": "select",
-        "primary_account_id": "account",
-        "offset_account_id": "account",
-        "memo": "text"
-    });
+    let opening_import = request.kind.as_deref() == Some("opening_balance_import");
+    let metadata = if opening_import {
+        json!({"kind":"opening_balance_import"})
+    } else {
+        json!({})
+    };
+    let required_inputs = if opening_import {
+        json!({"file_content":"json_file","account_mappings":"account_mapping"})
+    } else {
+        json!({
+            "entry_date": "date",
+            "description": "text",
+            "amount": "number",
+            "direction": "select",
+            "primary_account_id": "account",
+            "offset_account_id": "account",
+            "memo": "text"
+        })
+    };
     let workflow_json = json!({
         "workflow_name": workflow_name,
         "description": description,
-        "steps": [
+        "steps": if opening_import { json!([
+            {"kind":"form","collects":["Reviewed opening-balance JSON file", "Account mapping"]},
+            {"kind":"api_call","backend_api":"post_entry"}
+        ]) } else { json!([
             {"kind": "form", "collects": ["Entry date", "Description", "Amount", "Direction", "Primary account", "Offset account", "Memo (optional)"]},
             {"kind": "api_call", "backend_api": "post_entry"}
-        ],
+        ]) },
         "backend_api_calls": ["post_entry"],
-        "required_inputs": required_inputs
+        "required_inputs": required_inputs,
+        "metadata": metadata
     });
     let manifest_json = json!({
         "workflow_deployment_id": workflow_deployment_id,
@@ -89,16 +112,20 @@ pub async fn generate(
         "generated_by": "ledgerzero-backend workflow artifact preparer",
         "code_files": ["index.html", "app.js", "workflow-react.js"]
     });
-    let app_js = include_str!("workflow_template.js")
-        .replace("__WORKFLOW_ID__", &workflow_id.to_string())
-        .replace(
-            "__WORKFLOW_DEPLOYMENT_ID__",
-            &workflow_deployment_id.to_string(),
-        )
-        .replace(
-            "__WORKFLOW_NAME_JSON__",
-            &serde_json::to_string(&workflow_name).map_err(|error| error.to_string())?,
-        );
+    let app_js = (if opening_import {
+        include_str!("opening_import_template.js")
+    } else {
+        include_str!("workflow_template.js")
+    })
+    .replace("__WORKFLOW_ID__", &workflow_id.to_string())
+    .replace(
+        "__WORKFLOW_DEPLOYMENT_ID__",
+        &workflow_deployment_id.to_string(),
+    )
+    .replace(
+        "__WORKFLOW_NAME_JSON__",
+        &serde_json::to_string(&workflow_name).map_err(|error| error.to_string())?,
+    );
     let vendor = Path::new(frontend_dist)
         .join("workflow")
         .join("workflow-react.js");
@@ -167,6 +194,7 @@ pub async fn generate(
         description,
         backend_api_calls: vec!["post_entry".to_string()],
         required_inputs,
+        metadata,
         artifact_path: target.to_string_lossy().into_owned(),
     })
 }
@@ -234,6 +262,10 @@ pub async fn list(dev_artifacts_dir: &str) -> Result<Vec<WorkflowArtifactSummary
                 .unwrap_or_default(),
             required_inputs: workflow
                 .get("required_inputs")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            metadata: workflow
+                .get("metadata")
                 .cloned()
                 .unwrap_or_else(|| json!({})),
             artifact_path: path.to_string_lossy().into_owned(),

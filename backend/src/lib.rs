@@ -14,6 +14,7 @@ pub mod books_api;
 pub mod config;
 pub mod dev_artifacts;
 pub mod error;
+pub mod opening_import;
 pub mod sessions;
 pub mod state;
 pub mod users;

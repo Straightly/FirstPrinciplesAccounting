@@ -893,7 +893,111 @@ pub async fn post_entry(
     } else {
         book_context(&state, &headers, book_id).await?
     };
-    let id = mutate(&open_book, |engine| engine.post_entry(user.user_id, body)).await?;
+    let id = mutate(&open_book, |engine| {
+        if body.workflow.as_ref().is_some_and(|context| {
+            engine
+                .get_workflow(context.workflow_deployment_id)
+                .is_some_and(|workflow| workflow.metadata["kind"] == "opening_balance_import")
+        }) {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "opening-balance imports must use the dedicated import endpoint",
+            ));
+        }
+        engine.post_entry(user.user_id, body)
+    })
+    .await?;
+    Ok(Json(IdResponse { id }))
+}
+
+#[derive(Deserialize)]
+pub struct OpeningImportContextQuery {
+    pub workflow_deployment_id: Uuid,
+}
+
+pub async fn opening_import_context(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Query(query): Query<OpeningImportContextQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (user, open_book) = open_book_for_any_user(&state, &headers, book_id).await?;
+    let entity_id = open_book.meta.read().await.entity_id;
+    let engine = open_book.engine.read().await;
+    let workflow = engine
+        .get_workflow(query.workflow_deployment_id)
+        .filter(|workflow| {
+            workflow.entity_id == entity_id
+                && workflow.metadata["kind"] == "opening_balance_import"
+                && engine
+                    .workflows_authorized_for_user(user.user_id, entity_id)
+                    .iter()
+                    .any(|allowed| allowed.workflow_id == workflow.workflow_id)
+        })
+        .ok_or_else(|| ApiError::unauthorized_api("opening import workflow role is required"))?;
+    let chart = engine
+        .list_charts(entity_id)
+        .into_iter()
+        .find(|chart| chart.is_active)
+        .ok_or_else(|| ApiError::invalid_input("target entity has no active chart"))?;
+    Ok(Json(serde_json::json!({
+        "entity_id": entity_id,
+        "chart_id": chart.chart_id,
+        "chart_name": chart.name,
+        "workflow_id": workflow.workflow_id,
+        "workflow_deployment_id": workflow.workflow_deployment_id,
+    })))
+}
+
+pub async fn import_opening_balances(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<crate::opening_import::ImportRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    let (user, open_book) = open_book_for_any_user(&state, &headers, book_id).await?;
+    let entity_id = open_book.meta.read().await.entity_id;
+    {
+        let engine = open_book.engine.read().await;
+        let allowed = engine
+            .get_workflow(body.workflow.workflow_deployment_id)
+            .is_some_and(|workflow| {
+                workflow.entity_id == entity_id
+                    && workflow.workflow_id == body.workflow.workflow_id
+                    && workflow.metadata["kind"] == "opening_balance_import"
+                    && engine
+                        .workflows_authorized_for_user(user.user_id, entity_id)
+                        .iter()
+                        .any(|granted| granted.workflow_id == workflow.workflow_id)
+            });
+        if !allowed {
+            state.audit.record(
+                "authorization",
+                &user.email,
+                "denied",
+                "opening import workflow role is required",
+            );
+            return Err(ApiError::unauthorized_api(
+                "opening import workflow role is required",
+            ));
+        }
+    }
+    let id = mutate(&open_book, |engine| {
+        let workflow = engine
+            .get_workflow(body.workflow.workflow_deployment_id)
+            .ok_or_else(|| ledgerzero_engine::EngineError::invalid_input("unknown workflow"))?;
+        if workflow.entity_id != entity_id
+            || workflow.workflow_id != body.workflow.workflow_id
+            || workflow.metadata["kind"] != "opening_balance_import"
+        {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "wrong workflow for opening import",
+            ));
+        }
+        let entry = crate::opening_import::build_entry(&body, entity_id, engine)
+            .map_err(ledgerzero_engine::EngineError::invalid_input)?;
+        engine.post_entry(user.user_id, entry)
+    })
+    .await?;
     Ok(Json(IdResponse { id }))
 }
 

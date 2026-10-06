@@ -95,6 +95,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/books/{book_id}/entries/reverse",
             post(books_api::reverse_entry),
         )
+        .route(
+            "/books/{book_id}/opening-import/context",
+            get(books_api::opening_import_context),
+        )
+        .route(
+            "/books/{book_id}/opening-import",
+            post(books_api::import_opening_balances),
+        )
         .route("/books/{book_id}/audit-log", get(books_api::get_audit_log))
         .route(
             "/books/{book_id}/prices",
