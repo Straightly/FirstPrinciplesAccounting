@@ -88,7 +88,9 @@ pub async fn generate_with_workflow_id(
         json!({})
     };
     let required_inputs = if opening_import {
-        json!({"file_content":"json_file","account_mappings":"account_mapping","prepare_identities":"api_call"})
+        json!({"file_content":"json_file","account_mappings":"account_mapping","prepare_identities":"api_call",
+            "supported_import_versions":["1.0","1.1","1.2"],"setup_permissions":["list_accounts","list_resource_types","create_account","create_fixed_asset"],
+            "review_permissions":["list_fixed_assets","list_accounts","list_account_balances"]})
     } else {
         json!({
             "entry_date": "date",

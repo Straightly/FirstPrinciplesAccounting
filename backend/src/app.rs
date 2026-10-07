@@ -114,6 +114,26 @@ pub fn build_router(state: SharedState) -> Router {
             "/books/{book_id}/opening-import/prepare-identities",
             post(books_api::prepare_opening_import_identities),
         )
+        .route(
+            "/books/{book_id}/fixed-assets",
+            get(books_api::list_fixed_assets).post(books_api::create_fixed_asset),
+        )
+        .route(
+            "/books/{book_id}/fixed-assets/{asset_id}",
+            patch(books_api::update_fixed_asset),
+        )
+        .route(
+            "/books/{book_id}/fixed-assets/transactions",
+            post(books_api::record_fixed_asset_transaction),
+        )
+        .route(
+            "/books/{book_id}/property-profiles",
+            get(books_api::list_property_profiles),
+        )
+        .route(
+            "/books/{book_id}/opening-import/review",
+            get(books_api::opening_import_review),
+        )
         .route("/books/{book_id}/audit-log", get(books_api::get_audit_log))
         .route(
             "/books/{book_id}/prices",

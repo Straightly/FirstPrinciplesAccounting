@@ -1460,12 +1460,15 @@ async fn v11_import_prepares_stable_properties_then_posts_attributed_entry() {
 
 #[tokio::test]
 async fn zag_v11_draft_posts_to_a_disposable_book_when_fixture_path_is_set() {
-    let Ok(path) = std::env::var("FPA_ZAG_V11_DRAFT") else {
+    let Ok(path) =
+        std::env::var("FPA_ZAG_V12_DRAFT").or_else(|_| std::env::var("FPA_ZAG_V11_DRAFT"))
+    else {
         return;
     };
     let file_content = std::fs::read_to_string(path).unwrap();
     let package: Value = serde_json::from_str(&file_content).unwrap();
-    assert_eq!(package["schema_version"], "1.1");
+    let v12 = package["schema_version"] == "1.2";
+    assert!(v12 || package["schema_version"] == "1.1");
     assert_eq!(package["related_entities"].as_array().unwrap().len(), 6);
     let books_dir = tempfile::tempdir().unwrap();
     let artifacts_dir = tempfile::tempdir().unwrap();
@@ -1536,6 +1539,25 @@ async fn zag_v11_draft_posts_to_a_disposable_book_when_fixture_path_is_set() {
         StatusCode::OK
     );
     let workflow = json!({"workflow_id":workflow_id,"workflow_deployment_id":deployment_id,"workflow_execution_id":Uuid::new_v4()});
+    if v12 {
+        for permission in [
+            "create_fixed_asset",
+            "list_fixed_assets",
+            "list_accounts",
+            "list_account_balances",
+        ] {
+            id_field(
+                post(
+                    &app,
+                    &format!("/api/books/{book_id}/roles/{role_id}/permissions"),
+                    &owner_cookie,
+                    json!({"op_id":Uuid::new_v4(),"permission":permission}),
+                )
+                .await,
+            )
+            .await;
+        }
+    }
     let prepared_response = post(
         &app,
         &format!("/api/books/{book_id}/opening-import/prepare-identities"),
@@ -1558,7 +1580,14 @@ async fn zag_v11_draft_posts_to_a_disposable_book_when_fixture_path_is_set() {
         })
         .collect();
     let mut mappings = serde_json::Map::new();
-    for row in package["balance_rows"].as_array().unwrap() {
+    for row in package[if v12 {
+        "account_definitions"
+    } else {
+        "balance_rows"
+    }]
+    .as_array()
+    .unwrap()
+    {
         let key = row["external_account_key"].as_str().unwrap();
         let association = row["attribution_entity_key"]
             .as_str()
@@ -1605,6 +1634,44 @@ async fn zag_v11_draft_posts_to_a_disposable_book_when_fixture_path_is_set() {
             .count(),
         18
     );
+    let original_review = if v12 {
+        let review = body_json(
+            get(
+                &app,
+                &format!("/api/books/{book_id}/opening-import/review"),
+                &operator_cookie,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(review["assets"].as_array().unwrap().len(), 16);
+        assert_eq!(review["property_profiles"].as_array().unwrap().len(), 6);
+        assert_eq!(review["balances"].as_array().unwrap().len(), 93);
+        let sum = |field: &str| {
+            review["assets"].as_array().unwrap().iter().fold(
+                ledgerzero_engine::amount::Amount::ZERO,
+                |total, asset| {
+                    total
+                        .checked_add(asset[field].as_str().unwrap().parse().unwrap())
+                        .unwrap()
+                },
+            )
+        };
+        for field in ["cost", "land", "accumulated_depreciation"] {
+            let expected = package["fixed_assets"].as_array().unwrap().iter().fold(
+                ledgerzero_engine::amount::Amount::ZERO,
+                |total, asset| {
+                    total
+                        .checked_add(asset[field].as_str().unwrap().parse().unwrap())
+                        .unwrap()
+                },
+            );
+            assert_eq!(sum(field), expected);
+        }
+        Some(review)
+    } else {
+        None
+    };
     let backup_location = tempfile::tempdir().unwrap();
     assert_eq!(
         post(
@@ -1653,6 +1720,20 @@ async fn zag_v11_draft_posts_to_a_disposable_book_when_fixture_path_is_set() {
         .unwrap()
         .iter()
         .any(|entry| entry["entry_id"] == entry_id));
+    if let Some(review) = original_review {
+        assert_eq!(
+            review,
+            body_json(
+                get(
+                    &app,
+                    &format!("/api/books/{book_id}/opening-import/review"),
+                    &operator_cookie
+                )
+                .await
+            )
+            .await
+        );
+    }
 }
 
 #[tokio::test]
@@ -1686,4 +1767,467 @@ async fn opening_import_generator_packages_the_specific_spa_and_metadata() {
     assert!(app_js.contains("/accounts`"));
     assert!(app_js.contains("Post opening balances"));
     assert!(app_js.contains(&generated.workflow_id.to_string()));
+}
+
+#[tokio::test]
+async fn v12_import_register_permissions_reconciliation_and_reopen() {
+    let books = tempfile::tempdir().unwrap();
+    let artifacts = tempfile::tempdir().unwrap();
+    let app = app_over(books.path(), artifacts.path());
+    let (owner, _) = dev_login(&app, OWNER).await;
+    let (book, subject, _, _) = setup_book(&app, &owner).await;
+    let charts = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/charts?entity_id={subject}"),
+            &owner,
+        )
+        .await,
+    )
+    .await;
+    let chart = charts[0]["chart_id"].clone();
+    let resources =
+        body_json(get(&app, &format!("/api/books/{book}/resource-types"), &owner).await).await;
+    let resource = resources[0]["resource_type_id"].clone();
+    let deployment = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    write_artifact(artifacts.path(), deployment);
+    id_field(post(&app, &format!("/api/books/{book}/workflows/deploy"), &owner,
+        json!({"workflow_deployment_id":deployment,"workflow_id":workflow_id,"entity_id":subject,
+            "workflow_name":"Register import","backend_api_calls":["prepare_opening_import_entities","post_entry"],
+            "metadata":{"kind":"opening_balance_import"}})).await).await;
+    let roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/roles?entity_id={subject}"),
+            &owner,
+        )
+        .await,
+    )
+    .await;
+    let role = roles[0]["role_id"].as_str().unwrap();
+    let (operator, operator_id) = dev_login(&app, EMPLOYEE).await;
+    id_field(
+        post(
+            &app,
+            &format!("/api/books/{book}/roles/{role}/users"),
+            &owner,
+            json!({"op_id":Uuid::new_v4(),"user_id":operator_id}),
+        )
+        .await,
+    )
+    .await;
+    let definitions = json!([
+        {"external_account_key":"asset","proposed_account_name":"Oak cost","proposed_account_type":"ASSET","resource_code":"USD","attribution_entity_key":"oak","parent_external_account_key":null},
+        {"external_account_key":"contra","proposed_account_name":"Oak accumulated depreciation","proposed_account_type":"ASSET","resource_code":"USD","attribution_entity_key":"oak","parent_external_account_key":null},
+        {"external_account_key":"depreciation","proposed_account_name":"Oak depreciation","proposed_account_type":"EXPENSE","resource_code":"USD","attribution_entity_key":"oak","parent_external_account_key":null},
+        {"external_account_key":"equity","proposed_account_name":"Opening equity","proposed_account_type":"EQUITY","resource_code":"USD","attribution_entity_key":null,"parent_external_account_key":null},
+        {"external_account_key":"income","proposed_account_name":"Oak rent","proposed_account_type":"REVENUE","resource_code":"USD","attribution_entity_key":"oak","parent_external_account_key":null}
+    ]);
+    let mut package = json!({
+        "schema_version":"1.2","import_id":Uuid::new_v4(),"source_balance_date":"2026-02-09","opening_entry_date":"2026-02-10",
+        "declared_accounting_method":"cash","declared_balance_basis":"Reviewed example","resource_codes":["USD"],
+        "entity_namespace":"example","related_entities":[{"external_entity_key":"oak","name":"Oak","category":"PROPERTY","relationship":"OWNS","effective_from":"2026-02-10"}],
+        "source_material":[{"source_id":"fixture","sha256":"a".repeat(64),"label":"Example"}],
+        "balance_rows":[
+            {"external_account_key":"asset","proposed_account_name":"Oak cost","proposed_account_type":"ASSET","resource_code":"USD","debit":"10","credit":"0","source_id":"fixture","source_reference":"1","property_reference":"Oak","note":null,"attribution_entity_key":"oak"},
+            {"external_account_key":"contra","proposed_account_name":"Oak accumulated depreciation","proposed_account_type":"ASSET","resource_code":"USD","debit":"0","credit":"2","source_id":"fixture","source_reference":"1","property_reference":"Oak","note":null,"attribution_entity_key":"oak"},
+            {"external_account_key":"equity","proposed_account_name":"Opening equity","proposed_account_type":"EQUITY","resource_code":"USD","debit":"0","credit":"8","source_id":"fixture","source_reference":"1","property_reference":null,"note":null,"attribution_entity_key":null}],
+        "control_totals":{"USD":{"debit":"10","credit":"10"}},"account_definitions":definitions,
+        "property_facts":[{"external_entity_key":"oak","address":"1 Example Street","property_type":"MULTI_FAMILY_RESIDENCE","source_year":2026,"fair_rental_days":40,"personal_use_days":0,"source_id":"fixture","source_reference":"2"}],
+        "fixed_assets":[{"external_asset_key":"oak.building","name":"Building","attribution_entity_key":"oak","cost_account_key":"asset","accumulated_depreciation_account_key":"contra","depreciation_expense_account_key":"depreciation","land_account_key":null,
+            "in_service_date":"2020-01-01","cost":"10","land":"0","depreciable_basis":"10","business_use_percent":"100","useful_life_years":"27.50","method":"SL","convention":"MM",
+            "accumulated_depreciation_as_of":"2026-02-09","accumulated_depreciation":"2","schedules":[{"year":2026,"amount":"1","status":"PROJECTED","basis":"TAX_EQUALS_BOOK"}],"source_id":"fixture","source_reference":"3"}]
+    });
+    let workflow = json!({"workflow_id":workflow_id,"workflow_deployment_id":deployment,"workflow_execution_id":Uuid::new_v4()});
+    let prepare = |package: &Value| json!({"file_content":package.to_string(),"chart_id":chart,"workflow":workflow});
+    let pre_import_backup = tempfile::tempdir().unwrap();
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book}/backup"),
+            &owner,
+            json!({"location":pre_import_backup.path()})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let mut bad = package.clone();
+    bad["fixed_assets"][0]["cost"] = json!("11");
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book}/opening-import/prepare-identities"),
+            &operator,
+            prepare(&bad)
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut zero_depreciation = package.clone();
+    zero_depreciation["import_id"] = json!(Uuid::new_v4());
+    zero_depreciation["fixed_assets"][0]["accumulated_depreciation"] = json!("0");
+    zero_depreciation["balance_rows"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    zero_depreciation["balance_rows"][1]["credit"] = json!("10");
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book}/opening-import/prepare-identities"),
+            &operator,
+            prepare(&zero_depreciation)
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let prepared = body_json(
+        post(
+            &app,
+            &format!("/api/books/{book}/opening-import/prepare-identities"),
+            &operator,
+            prepare(&package),
+        )
+        .await,
+    )
+    .await;
+    let property = prepared["resolved_entities"][0]["entity_id"].clone();
+    assert!(property.is_string(), "{prepared}");
+    let mut mappings = serde_json::Map::new();
+    for definition in definitions.as_array().unwrap() {
+        let id = id_field(post(&app, &format!("/api/books/{book}/accounts"), &owner,
+            json!({"op_id":Uuid::new_v4(),"chart_id":chart,"name":definition["proposed_account_name"],"account_type":definition["proposed_account_type"],
+                "resource_type_id":resource,"parent_account_id":null,"associated_entity_id":if definition["attribution_entity_key"].is_null(){Value::Null}else{property.clone()},"validation_rules":{},"metadata":{}})).await).await;
+        mappings.insert(
+            definition["external_account_key"].as_str().unwrap().into(),
+            json!(id),
+        );
+    }
+    let request = |package: &Value| json!({"file_content":package.to_string(),"chart_id":chart,"account_mappings":mappings,"workflow":workflow});
+    let path = format!("/api/books/{book}/opening-import");
+    assert_eq!(
+        post(&app, &path, &operator, request(&package))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    id_field(
+        post(
+            &app,
+            &format!("/api/books/{book}/roles/{role}/permissions"),
+            &owner,
+            json!({"op_id":Uuid::new_v4(),"permission":"create_fixed_asset"}),
+        )
+        .await,
+    )
+    .await;
+    let first = post(&app, &path, &operator, request(&package)).await;
+    let status = first.status();
+    let result = body_json(first).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        post(&app, &path, &operator, request(&package))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(&app, &format!("/api/books/{book}/fixed-assets"), &operator)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    id_field(
+        post(
+            &app,
+            &format!("/api/books/{book}/roles/{role}/permissions"),
+            &owner,
+            json!({"op_id":Uuid::new_v4(),"permission":"list_fixed_assets"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        get(
+            &app,
+            &format!("/api/books/{book}/opening-import/review"),
+            &operator
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    for permission in ["list_accounts", "list_account_balances"] {
+        id_field(
+            post(
+                &app,
+                &format!("/api/books/{book}/roles/{role}/permissions"),
+                &owner,
+                json!({"op_id":Uuid::new_v4(),"permission":permission}),
+            )
+            .await,
+        )
+        .await;
+    }
+    let mut review = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/opening-import/review"),
+            &operator,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(review["assets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        review["property_profiles"][0]["address"],
+        "1 Example Street"
+    );
+    assert_eq!(review["assets"][0]["schedules"][0]["amount"], "1.00000000");
+    let entries = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/entries?entity_id={subject}"),
+            &owner,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(entries.as_array().unwrap().len(), 1);
+    assert_eq!(entries[0]["lines"].as_array().unwrap().len(), 3);
+    package["import_id"] = json!(Uuid::new_v4());
+    package["fixed_assets"][0]["accumulated_depreciation"] = json!("3");
+    assert_eq!(
+        post(&app, &path, &operator, request(&package))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        body_json(
+            get(
+                &app,
+                &format!("/api/books/{book}/entries?entity_id={subject}"),
+                &owner
+            )
+            .await
+        )
+        .await
+        .as_array()
+        .unwrap()
+        .len(),
+        1
+    );
+    let journal_deployment = Uuid::new_v4();
+    let journal_workflow = Uuid::new_v4();
+    write_artifact(artifacts.path(), journal_deployment);
+    id_field(post(&app, &format!("/api/books/{book}/workflows/deploy"), &owner,
+        json!({"workflow_deployment_id":journal_deployment,"workflow_id":journal_workflow,"entity_id":subject,
+            "workflow_name":"Asset changes","backend_api_calls":["post_entry"],"metadata":{}})).await).await;
+    let all_roles = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/roles?entity_id={subject}"),
+            &owner,
+        )
+        .await,
+    )
+    .await;
+    let journal_role = all_roles
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "Asset changes")
+        .unwrap()["role_id"]
+        .as_str()
+        .unwrap();
+    id_field(
+        post(
+            &app,
+            &format!("/api/books/{book}/roles/{journal_role}/users"),
+            &owner,
+            json!({"op_id":Uuid::new_v4(),"user_id":operator_id}),
+        )
+        .await,
+    )
+    .await;
+    let entry_id = Uuid::new_v4();
+    let journal_context = json!({"workflow_id":journal_workflow,"workflow_deployment_id":journal_deployment,"workflow_execution_id":Uuid::new_v4()});
+    let mut asset = review["assets"][0].clone();
+    asset["asset_id"] = json!(Uuid::new_v4());
+    asset["external_key"] = json!("oak.roof");
+    asset["name"] = json!("New roof");
+    asset["cost"] = json!("3");
+    asset["depreciable_basis"] = json!("3");
+    asset["accumulated_depreciation"] = json!("0");
+    asset["in_service_date"] = json!("2026-02-10");
+    asset["accumulated_depreciation_as_of"] = json!("2026-02-10");
+    asset["linked_entry_id"] = json!(entry_id);
+    asset["schedules"][0]["amount"] = json!("0.10");
+    let asset_entry = |entry_id: Uuid, amount: &str| {
+        json!({"entry_id":entry_id,"entity_id":subject,
+        "entry_date":"2026-02-10","description":"Capital improvement","source":"WORKFLOW","workflow":journal_context,
+        "metadata":{},"lines":[{"line_id":Uuid::new_v4(),"account_id":mappings["asset"],
+            "attribution_entity_id":property,"debit_amount":amount,"memo":null},
+            {"line_id":Uuid::new_v4(),"account_id":mappings["equity"],"credit_amount":amount,"memo":null}]})
+    };
+    let asset_path = format!("/api/books/{book}/fixed-assets/transactions");
+    let acquisition = json!({"entry":asset_entry(entry_id,"3"),"asset":asset});
+    let acquired = post(&app, &asset_path, &operator, acquisition.clone()).await;
+    let status = acquired.status();
+    let value = body_json(acquired).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(
+        post(&app, &asset_path, &operator, acquisition)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let mut improved = review["assets"][0].clone();
+    let improvement_id = Uuid::new_v4();
+    improved["linked_entry_id"] = json!(improvement_id);
+    improved["cost"] = json!("12");
+    improved["depreciable_basis"] = json!("12");
+    let improvement = json!({"entry":asset_entry(improvement_id,"2"),"asset":improved});
+    assert_eq!(
+        post(&app, &asset_path, &operator, improvement.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    id_field(
+        post(
+            &app,
+            &format!("/api/books/{book}/roles/{role}/permissions"),
+            &owner,
+            json!({"op_id":Uuid::new_v4(),"permission":"update_fixed_asset"}),
+        )
+        .await,
+    )
+    .await;
+    let response = post(&app, &asset_path, &operator, improvement).await;
+    let status = response.status();
+    let value = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    review = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/opening-import/review"),
+            &operator,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(review["assets"].as_array().unwrap().len(), 2);
+    assert!(review["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["cost"] == "12.00000000" && a["revision"] == 1));
+    let backup = tempfile::tempdir().unwrap();
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book}/backup"),
+            &owner,
+            json!({"location":backup.path()})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(&app, &format!("/api/books/{book}/close"), &owner, json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            "/api/books/restore",
+            &owner,
+            json!({"location":backup.path()})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book}/open"),
+            &owner,
+            json!({"passphrase":"correct horse battery staple"})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let reopened = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/opening-import/review"),
+            &operator,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(review, reopened);
+    assert_eq!(
+        post(&app, &format!("/api/books/{book}/close"), &owner, json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            "/api/books/restore",
+            &owner,
+            json!({"location":pre_import_backup.path()})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            &format!("/api/books/{book}/open"),
+            &owner,
+            json!({"passphrase":"correct horse battery staple"})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let reset = body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/opening-import/review"),
+            &owner,
+        )
+        .await,
+    )
+    .await;
+    assert!(reset["assets"].as_array().unwrap().is_empty());
+    assert!(reset["property_profiles"].as_array().unwrap().is_empty());
+    assert_eq!(reset["balances"].as_array().unwrap().len(), 2);
+    assert!(body_json(
+        get(
+            &app,
+            &format!("/api/books/{book}/entries?entity_id={subject}"),
+            &owner
+        )
+        .await
+    )
+    .await
+    .as_array()
+    .unwrap()
+    .is_empty());
 }

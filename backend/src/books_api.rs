@@ -922,7 +922,8 @@ pub async fn get_balance(
     headers: HeaderMap,
     Path((book_id, account_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<BalanceView>, ApiError> {
-    let (_, open_book) = book_context(&state, &headers, book_id).await?;
+    let (_, open_book, _) =
+        book_with_permission(&state, &headers, book_id, "list_account_balances").await?;
     let engine = open_book.engine.read().await;
     Ok(Json(engine.get_balance(account_id)?))
 }
@@ -1090,6 +1091,10 @@ pub async fn import_opening_balances(
 ) -> Result<Json<IdResponse>, ApiError> {
     let (user, open_book) = open_book_for_any_user(&state, &headers, book_id).await?;
     let entity_id = open_book.meta.read().await.entity_id;
+    let is_owner = user
+        .email
+        .trim()
+        .eq_ignore_ascii_case(open_book.meta.read().await.owner_email.trim());
     {
         let engine = open_book.engine.read().await;
         let allowed = engine
@@ -1114,6 +1119,20 @@ pub async fn import_opening_balances(
                 "opening import workflow role is required",
             ));
         }
+        if crate::opening_import::is_v12(&body.file_content)
+            && !is_owner
+            && !engine.user_has_permission(user.user_id, entity_id, "create_fixed_asset")
+        {
+            state.audit.record(
+                "authorization",
+                &user.email,
+                "denied",
+                "create_fixed_asset permission is required",
+            );
+            return Err(ApiError::unauthorized_api(
+                "create_fixed_asset permission is required",
+            ));
+        }
     }
     let id = mutate(&open_book, |engine| {
         let workflow = engine
@@ -1129,7 +1148,29 @@ pub async fn import_opening_balances(
         }
         let entry = crate::opening_import::build_entry(&body, entity_id, engine)
             .map_err(ledgerzero_engine::EngineError::invalid_input)?;
-        engine.post_entry(user.user_id, entry)
+        if !crate::opening_import::is_v12(&body.file_content) {
+            return engine.post_entry(user.user_id, entry);
+        }
+        require_mutation_permission(
+            engine,
+            user.user_id,
+            entity_id,
+            "create_fixed_asset",
+            is_owner,
+        )?;
+        let assets = crate::opening_import::imported_assets(&body, entity_id, engine)
+            .map_err(ledgerzero_engine::EngineError::invalid_input)?;
+        // Validate the register and entry together before changing the live engine.
+        let mut staged = AccountingEngine::from_state(
+            engine.state().clone(),
+            Box::new(ledgerzero_engine::types::SystemClock),
+        );
+        let id = staged.post_entry(user.user_id, entry)?;
+        for asset in assets {
+            staged.create_fixed_asset(asset.asset_id, user.user_id, asset)?;
+        }
+        *engine = staged;
+        Ok(id)
     })
     .await?;
     Ok(Json(IdResponse { id }))
@@ -1195,7 +1236,14 @@ pub async fn prepare_opening_import_identities(
             &body.workflow,
             "prepare_opening_import_entities",
         )?;
-        engine.prepare_import_properties(op_id, user.user_id, spec)
+        let id = engine.prepare_import_properties(op_id, user.user_id, spec)?;
+        let profiles = crate::opening_import::property_profiles(&body, subject_id, engine)
+            .map_err(ledgerzero_engine::EngineError::invalid_input)?;
+        if !profiles.is_empty() {
+            let profile_id = Uuid::from_u128(op_id.as_u128() ^ 1);
+            engine.upsert_property_profiles(profile_id, user.user_id, profiles)?;
+        }
+        Ok(id)
     })
     .await?;
     let engine = open_book.engine.read().await;
@@ -1206,6 +1254,197 @@ pub async fn prepare_opening_import_identities(
     Ok(Json(
         serde_json::json!({"preparation_id":op_id,"entity_namespace":namespace,"resolved_entities":resolved}),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedAssetRequest {
+    pub op_id: Uuid,
+    pub asset: FixedAsset,
+}
+
+pub async fn create_fixed_asset(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<FixedAssetRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    let (user, open_book, is_owner) =
+        book_with_permission(&state, &headers, book_id, "create_fixed_asset").await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let id = mutate(&open_book, |engine| {
+        require_mutation_permission(
+            engine,
+            user.user_id,
+            subject_id,
+            "create_fixed_asset",
+            is_owner,
+        )?;
+        if body.asset.entity_id != subject_id {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "asset must belong to the book subject",
+            ));
+        }
+        engine.create_fixed_asset(body.op_id, user.user_id, body.asset)
+    })
+    .await?;
+    Ok(Json(IdResponse { id }))
+}
+
+pub async fn list_fixed_assets(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, open_book, _) =
+        book_with_permission(&state, &headers, book_id, "list_fixed_assets").await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let engine = open_book.engine.read().await;
+    Ok(Json(
+        serde_json::json!(engine.list_fixed_assets(subject_id)),
+    ))
+}
+
+pub async fn update_fixed_asset(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((book_id, asset_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<FixedAssetRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    let (user, open_book, is_owner) =
+        book_with_permission(&state, &headers, book_id, "update_fixed_asset").await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let id = mutate(&open_book, |engine| {
+        require_mutation_permission(
+            engine,
+            user.user_id,
+            subject_id,
+            "update_fixed_asset",
+            is_owner,
+        )?;
+        if body.asset.asset_id != asset_id || body.asset.entity_id != subject_id {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "asset path and subject must match the record",
+            ));
+        }
+        engine.update_fixed_asset(body.op_id, user.user_id, body.asset)
+    })
+    .await?;
+    Ok(Json(IdResponse { id }))
+}
+
+pub async fn list_property_profiles(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, open_book, _) =
+        book_with_permission(&state, &headers, book_id, "list_fixed_assets").await?;
+    let engine = open_book.engine.read().await;
+    Ok(Json(serde_json::json!(engine.list_property_profiles())))
+}
+
+pub async fn opening_import_review(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (user, open_book, is_owner) =
+        book_with_permission(&state, &headers, book_id, "list_fixed_assets").await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let engine = open_book.engine.read().await;
+    for permission in ["list_accounts", "list_account_balances"] {
+        if !is_owner && !engine.user_has_permission(user.user_id, subject_id, permission) {
+            state
+                .audit
+                .record("authorization", &user.email, "denied", permission);
+            return Err(ApiError::unauthorized_api(format!(
+                "Import review requires {permission} permission"
+            )));
+        }
+    }
+    let balances: Vec<_> = engine.list_charts(subject_id).iter().flat_map(|chart| engine.list_accounts(chart.chart_id))
+        .map(|account| serde_json::json!({"account_id":account.account_id,"account_name":account.name,
+            "property_entity_id":account.associated_entity_id,"balance":engine.get_balance(account.account_id).expect("listed account exists")})).collect();
+    Ok(Json(
+        serde_json::json!({"assets":engine.list_fixed_assets(subject_id),
+        "property_profiles":engine.list_property_profiles(),"balances":balances}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedAssetTransactionRequest {
+    pub entry: NewEntry,
+    pub asset: FixedAsset,
+}
+
+fn asset_transaction_permission(
+    engine: &AccountingEngine,
+    body: &FixedAssetTransactionRequest,
+) -> &'static str {
+    if engine.audit_log().iter().any(|event| {
+        matches!(&event.payload,
+        EventPayload::FixedAssetCreated {asset} if asset.asset_id == body.asset.asset_id
+            && asset.linked_entry_id == Some(body.entry.entry_id))
+    }) {
+        "create_fixed_asset"
+    } else if engine.get_fixed_asset(body.asset.asset_id).is_some() {
+        "update_fixed_asset"
+    } else {
+        "create_fixed_asset"
+    }
+}
+
+pub async fn record_fixed_asset_transaction(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(book_id): Path<Uuid>,
+    Json(body): Json<FixedAssetTransactionRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    let permission = {
+        let (_, open_book) = open_book_for_any_user(&state, &headers, book_id).await?;
+        let engine = open_book.engine.read().await;
+        asset_transaction_permission(&engine, &body)
+    };
+    let (user, open_book, is_owner) =
+        book_with_permission(&state, &headers, book_id, permission).await?;
+    let subject_id = open_book.meta.read().await.entity_id;
+    let id = mutate(&open_book, |engine| {
+        let current_permission = asset_transaction_permission(engine, &body);
+        require_mutation_permission(
+            engine,
+            user.user_id,
+            subject_id,
+            current_permission,
+            is_owner,
+        )?;
+        if body.entry.entity_id != subject_id || body.asset.entity_id != subject_id {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "asset transaction must belong to the book subject",
+            ));
+        }
+        if body.entry.workflow.is_none() && !is_owner {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "a delegated asset transaction requires an authorized journal workflow",
+            ));
+        }
+        if body.entry.workflow.as_ref().is_some_and(|context| {
+            engine
+                .get_workflow(context.workflow_deployment_id)
+                .is_some_and(|workflow| workflow.metadata["kind"] == "opening_balance_import")
+        }) {
+            return Err(ledgerzero_engine::EngineError::invalid_input(
+                "opening imports must use the import endpoint",
+            ));
+        }
+        if let Some(context) = &body.entry.workflow {
+            engine.authorize_workflow_api(user.user_id, subject_id, context, "post_entry")?;
+        }
+        engine.record_fixed_asset_transaction(user.user_id, body.entry, body.asset)
+    })
+    .await?;
+    Ok(Json(IdResponse { id }))
 }
 
 pub async fn reverse_entry(

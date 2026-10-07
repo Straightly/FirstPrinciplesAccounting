@@ -13,6 +13,55 @@ use uuid::Uuid;
 // Reference model
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DepreciationSchedule {
+    pub year: u16,
+    pub amount: Amount,
+    pub status: String,
+    pub basis: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedAsset {
+    pub asset_id: Uuid,
+    pub entity_id: Uuid,
+    pub property_entity_id: Uuid,
+    pub external_namespace: String,
+    pub external_key: String,
+    pub name: String,
+    pub cost_account_id: Uuid,
+    pub accumulated_depreciation_account_id: Uuid,
+    pub depreciation_expense_account_id: Uuid,
+    pub land_account_id: Option<Uuid>,
+    pub in_service_date: Date,
+    pub cost: Amount,
+    pub land: Amount,
+    pub depreciable_basis: Amount,
+    pub business_use_percent: Amount,
+    pub useful_life_years: Amount,
+    pub method: String,
+    pub convention: String,
+    pub accumulated_depreciation_as_of: Date,
+    pub accumulated_depreciation: Amount,
+    pub schedules: Vec<DepreciationSchedule>,
+    pub status: String,
+    pub source_metadata: serde_json::Value,
+    pub linked_entry_id: Option<Uuid>,
+    #[serde(default)]
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PropertyProfile {
+    pub property_entity_id: Uuid,
+    pub address: String,
+    pub property_type: String,
+    pub source_year: u16,
+    pub fair_rental_days: u16,
+    pub personal_use_days: u16,
+    pub source_metadata: serde_json::Value,
+}
+
 /// Managed or external party (Impl Spec §2.9). "Counterparty" is a contextual
 /// label, not a type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -322,6 +371,16 @@ pub struct JournalEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventPayload {
+    FixedAssetCreated {
+        asset: FixedAsset,
+    },
+    FixedAssetUpdated {
+        asset: FixedAsset,
+    },
+    PropertyProfilesUpserted {
+        operation_id: Uuid,
+        profiles: Vec<PropertyProfile>,
+    },
     EntityCreated {
         entity: Entity,
     },
@@ -401,6 +460,9 @@ pub enum EventPayload {
 impl EventPayload {
     pub fn event_type(&self) -> EventType {
         match self {
+            EventPayload::FixedAssetCreated { .. }
+            | EventPayload::FixedAssetUpdated { .. }
+            | EventPayload::PropertyProfilesUpserted { .. } => EventType::Administrative,
             EventPayload::EntityCreated { .. }
             | EventPayload::EntityRelationshipCreated { .. }
             | EventPayload::ImportEntitiesPrepared { .. }
@@ -426,6 +488,9 @@ impl EventPayload {
     /// idempotent replay returns.
     pub fn outcome_id(&self) -> Uuid {
         match self {
+            EventPayload::FixedAssetCreated { asset }
+            | EventPayload::FixedAssetUpdated { asset } => asset.asset_id,
+            EventPayload::PropertyProfilesUpserted { operation_id, .. } => *operation_id,
             EventPayload::EntityCreated { entity } => entity.entity_id,
             EventPayload::EntityRelationshipCreated { relationship } => {
                 relationship.relationship_id

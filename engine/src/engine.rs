@@ -296,6 +296,8 @@ pub struct EngineState {
     accounts: BTreeMap<Uuid, Account>,
     periods: BTreeMap<Uuid, Period>,
     entries: BTreeMap<Uuid, JournalEntry>,
+    fixed_assets: BTreeMap<Uuid, FixedAsset>,
+    property_profiles: BTreeMap<Uuid, PropertyProfile>,
     balances: BTreeMap<Uuid, AccountBalance>,
     prices: BTreeMap<(Uuid, Uuid), PriceProjectionEntry>,
     idempotency: BTreeMap<Uuid, IdempotencyRecord>,
@@ -318,6 +320,8 @@ impl EngineState {
             accounts: BTreeMap::new(),
             periods: BTreeMap::new(),
             entries: BTreeMap::new(),
+            fixed_assets: BTreeMap::new(),
+            property_profiles: BTreeMap::new(),
             balances: BTreeMap::new(),
             prices: BTreeMap::new(),
             idempotency: BTreeMap::new(),
@@ -357,6 +361,16 @@ impl EngineState {
             },
         );
         match &record.payload {
+            EventPayload::FixedAssetCreated { asset }
+            | EventPayload::FixedAssetUpdated { asset } => {
+                self.fixed_assets.insert(asset.asset_id, asset.clone());
+            }
+            EventPayload::PropertyProfilesUpserted { profiles, .. } => {
+                for profile in profiles {
+                    self.property_profiles
+                        .insert(profile.property_entity_id, profile.clone());
+                }
+            }
             EventPayload::EntityCreated { entity } => {
                 self.entities.insert(entity.entity_id, entity.clone());
             }
@@ -1637,6 +1651,10 @@ impl AccountingEngine {
             return Err(EngineError::invalid_input("role name must not be empty"));
         }
         let allowed = [
+            "list_account_balances",
+            "create_fixed_asset",
+            "list_fixed_assets",
+            "update_fixed_asset",
             "list_accounts",
             "list_entities",
             "list_charts",
@@ -1734,6 +1752,10 @@ impl AccountingEngine {
             return Ok(done);
         }
         let allowed = [
+            "list_account_balances",
+            "create_fixed_asset",
+            "list_fixed_assets",
+            "update_fixed_asset",
             "list_accounts",
             "list_entities",
             "list_charts",
@@ -1887,6 +1909,477 @@ impl AccountingEngine {
 
     // -- posting --------------------------------------------------------------
 
+    fn validate_property(&self, id: Uuid) -> Result<(), EngineError> {
+        match self.state.entities.get(&id) {
+            Some(entity) if !entity.is_subject && entity.category == EntityCategory::Property => {
+                Ok(())
+            }
+            _ => Err(EngineError::invalid_input(
+                "expected a referenced property entity",
+            )),
+        }
+    }
+
+    fn validate_fixed_asset(&self, asset: &FixedAsset) -> Result<(), EngineError> {
+        self.require_subject(asset.entity_id)?;
+        self.validate_property(asset.property_entity_id)?;
+        if asset.asset_id.is_nil()
+            || asset.name.trim().is_empty()
+            || asset.external_namespace.trim().is_empty()
+            || asset.external_key.trim().is_empty()
+        {
+            return Err(EngineError::invalid_input(
+                "asset identity and name are required",
+            ));
+        }
+        if self.state.fixed_assets.values().any(|other| {
+            other.asset_id != asset.asset_id
+                && other.entity_id == asset.entity_id
+                && other.external_namespace == asset.external_namespace
+                && other.external_key == asset.external_key
+        }) {
+            return Err(EngineError::invalid_input(
+                "duplicate external asset identity",
+            ));
+        }
+        if asset.method != "SL"
+            || asset.convention != "MM"
+            || !["27.5".parse::<Amount>().unwrap(), "39".parse().unwrap()]
+                .contains(&asset.useful_life_years)
+            || !matches!(asset.status.as_str(), "ACTIVE" | "DISPOSED")
+        {
+            return Err(EngineError::invalid_input(
+                "unsupported depreciation method, convention, life or status",
+            ));
+        }
+        if [
+            asset.cost,
+            asset.land,
+            asset.depreciable_basis,
+            asset.accumulated_depreciation,
+            asset.business_use_percent,
+        ]
+        .iter()
+        .any(Amount::is_negative)
+            || asset.business_use_percent > "100".parse().unwrap()
+            || asset.depreciable_basis > asset.cost
+            || asset.accumulated_depreciation > asset.depreciable_basis
+            || asset.accumulated_depreciation_as_of < asset.in_service_date
+        {
+            return Err(EngineError::invalid_input(
+                "invalid asset amounts or depreciation date",
+            ));
+        }
+        if asset.status == "DISPOSED"
+            && [
+                asset.cost,
+                asset.land,
+                asset.depreciable_basis,
+                asset.accumulated_depreciation,
+            ]
+            .iter()
+            .any(|amount| !amount.is_zero())
+        {
+            return Err(EngineError::invalid_input(
+                "disposed assets must have zero cost, land, basis and accumulated depreciation",
+            ));
+        }
+        let mut years = std::collections::BTreeSet::new();
+        let service_year: u16 = asset.in_service_date.as_str()[..4].parse().unwrap();
+        let as_of_year: u16 = asset.accumulated_depreciation_as_of.as_str()[..4]
+            .parse()
+            .unwrap();
+        let remaining = asset
+            .depreciable_basis
+            .checked_sub(asset.accumulated_depreciation)
+            .map_err(EngineError::invalid_input)?;
+        let mut remaining_schedules = Amount::ZERO;
+        for schedule in &asset.schedules {
+            if schedule.year < service_year
+                || schedule.year == 0
+                || schedule.year > 9999
+                || !years.insert(schedule.year)
+                || schedule.amount.is_negative()
+                || schedule.amount > asset.depreciable_basis
+                || !matches!(schedule.status.as_str(), "PROJECTED" | "REVIEWED")
+                || schedule.basis != "TAX_EQUALS_BOOK"
+            {
+                return Err(EngineError::invalid_input("invalid depreciation schedule"));
+            }
+            // The source year is pending too; earlier years are historical
+            // and already represented by accumulated depreciation.
+            if schedule.year >= as_of_year {
+                if schedule.amount > remaining {
+                    return Err(EngineError::invalid_input(
+                        "schedule amount exceeds remaining depreciable basis",
+                    ));
+                }
+                remaining_schedules = remaining_schedules
+                    .checked_add(schedule.amount)
+                    .map_err(EngineError::invalid_input)?;
+                if remaining_schedules > remaining {
+                    return Err(EngineError::invalid_input(
+                        "combined pending schedules exceed remaining depreciable basis",
+                    ));
+                }
+            }
+        }
+        let mut accounts = vec![
+            (asset.cost_account_id, AccountType::Asset),
+            (
+                asset.accumulated_depreciation_account_id,
+                AccountType::Asset,
+            ),
+            (asset.depreciation_expense_account_id, AccountType::Expense),
+        ];
+        if let Some(id) = asset.land_account_id {
+            accounts.push((id, AccountType::Asset));
+        }
+        if !asset.land.is_zero() && asset.land_account_id.is_none() {
+            return Err(EngineError::invalid_input("land requires a land account"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut unit_chart = None;
+        for (id, kind) in accounts {
+            let account = self
+                .state
+                .accounts
+                .get(&id)
+                .ok_or_else(|| EngineError::invalid_input("unknown asset account"))?;
+            let pair = (account.resource_type_id, account.chart_id);
+            if !seen.insert(id)
+                || !account.is_active
+                || account.entity_id != asset.entity_id
+                || account.account_type != kind
+                || account.associated_entity_id != Some(asset.property_entity_id)
+                || unit_chart.is_some_and(|expected| expected != pair)
+                || self.state.resource_types[&account.resource_type_id].kind
+                    != ResourceKind::Currency
+            {
+                return Err(EngineError::invalid_input("asset accounts must be distinct active property-linked accounts in one subject, chart and currency"));
+            }
+            unit_chart = Some(pair);
+        }
+        let resource_id = self.state.accounts[&asset.cost_account_id].resource_type_id;
+        for amount in [
+            asset.cost,
+            asset.land,
+            asset.depreciable_basis,
+            asset.accumulated_depreciation,
+        ]
+        .into_iter()
+        .chain(asset.schedules.iter().map(|schedule| schedule.amount))
+        {
+            self.validate_currency_precision(resource_id, amount)?;
+        }
+        Ok(())
+    }
+
+    fn validate_currency_precision(
+        &self,
+        resource_id: Uuid,
+        amount: Amount,
+    ) -> Result<(), EngineError> {
+        let resource = &self.state.resource_types[&resource_id];
+        let quantum = 10_i128.pow(u32::from(8 - resource.precision.min(8)));
+        if resource.kind == ResourceKind::Currency && amount.raw() % quantum != 0 {
+            return Err(EngineError::invalid_input(
+                "monetary amount exceeds currency precision",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn create_fixed_asset(
+        &mut self,
+        op_id: Uuid,
+        actor: Uuid,
+        asset: FixedAsset,
+    ) -> Result<Uuid, EngineError> {
+        let request = json!({ "op": "create_fixed_asset", "asset": asset });
+        if let Some(done) = self.check_idempotency(op_id, &request)? {
+            return Ok(done);
+        }
+        self.validate_fixed_asset(&asset)?;
+        if self.state.fixed_assets.contains_key(&asset.asset_id) || asset.revision != 0 {
+            return Err(EngineError::invalid_input(
+                "new register asset must have revision zero and a new asset id",
+            ));
+        }
+        if let Some(entry_id) = asset.linked_entry_id {
+            let entry = self.state.entries.get(&entry_id).ok_or_else(|| {
+                EngineError::invalid_input("unknown opening entry linked to asset")
+            })?;
+            if entry.entity_id != asset.entity_id
+                || !entry.lines.iter().any(|line| {
+                    line.account_id == asset.cost_account_id && line.debit_amount.is_some()
+                })
+                || (!asset.accumulated_depreciation.is_zero()
+                    && !entry.lines.iter().any(|line| {
+                        line.account_id == asset.accumulated_depreciation_account_id
+                            && line.credit_amount.is_some()
+                    }))
+                || (!asset.land.is_zero()
+                    && !entry.lines.iter().any(|line| {
+                        Some(line.account_id) == asset.land_account_id
+                            && line.debit_amount.is_some()
+                    }))
+            {
+                return Err(EngineError::invalid_input("opening entry must contain this subject's cost, accumulated depreciation and applicable land controls"));
+            }
+        }
+        Ok(self.record(
+            op_id,
+            actor,
+            request,
+            EventPayload::FixedAssetCreated { asset },
+        ))
+    }
+
+    pub fn list_fixed_assets(&self, entity_id: Uuid) -> Vec<&FixedAsset> {
+        self.state
+            .fixed_assets
+            .values()
+            .filter(|asset| asset.entity_id == entity_id)
+            .collect()
+    }
+
+    pub fn get_fixed_asset(&self, id: Uuid) -> Option<&FixedAsset> {
+        self.state.fixed_assets.get(&id)
+    }
+
+    /// Schedule review and descriptive edits cannot change ledger-linked facts.
+    /// The input revision is the expected current revision, not the next one.
+    pub fn update_fixed_asset(
+        &mut self,
+        op_id: Uuid,
+        actor: Uuid,
+        mut asset: FixedAsset,
+    ) -> Result<Uuid, EngineError> {
+        let request = json!({ "op": "update_fixed_asset", "asset": asset });
+        if let Some(done) = self.check_idempotency(op_id, &request)? {
+            return Ok(done);
+        }
+        self.validate_fixed_asset(&asset)?;
+        let old = self
+            .state
+            .fixed_assets
+            .get(&asset.asset_id)
+            .ok_or_else(|| EngineError::invalid_input("unknown asset"))?;
+        let mut allowed = old.clone();
+        allowed.name = asset.name.clone();
+        allowed.schedules = asset.schedules.clone();
+        allowed.source_metadata = asset.source_metadata.clone();
+        if asset != allowed || old.status != "ACTIVE" {
+            return Err(EngineError::invalid_input("stale revision or changed ledger-linked asset facts; use record_fixed_asset_transaction"));
+        }
+        asset.revision = old
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| EngineError::invalid_input("asset revision overflow"))?;
+        Ok(self.record(
+            op_id,
+            actor,
+            request,
+            EventPayload::FixedAssetUpdated { asset },
+        ))
+    }
+
+    pub fn upsert_property_profiles(
+        &mut self,
+        op_id: Uuid,
+        actor: Uuid,
+        profiles: Vec<PropertyProfile>,
+    ) -> Result<Uuid, EngineError> {
+        let request = json!({ "op": "upsert_property_profiles", "profiles": profiles });
+        if let Some(done) = self.check_idempotency(op_id, &request)? {
+            return Ok(done);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for profile in &profiles {
+            self.validate_property(profile.property_entity_id)?;
+            let year = profile.source_year;
+            let days = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                366
+            } else {
+                365
+            };
+            if !seen.insert(profile.property_entity_id)
+                || year == 0
+                || year > 9999
+                || u32::from(profile.fair_rental_days) + u32::from(profile.personal_use_days) > days
+                || profile.address.trim().is_empty()
+                || profile.property_type.trim().is_empty()
+            {
+                return Err(EngineError::invalid_input(
+                    "invalid or duplicate property profile",
+                ));
+            }
+        }
+        Ok(self.record(
+            op_id,
+            actor,
+            request,
+            EventPayload::PropertyProfilesUpserted {
+                operation_id: op_id,
+                profiles,
+            },
+        ))
+    }
+
+    pub fn list_property_profiles(&self) -> Vec<&PropertyProfile> {
+        self.state.property_profiles.values().collect()
+    }
+
+    /// Both events are staged before publishing any projection. Storage callers
+    /// must persist the resulting event suffix in a single append batch.
+    pub fn record_fixed_asset_transaction(
+        &mut self,
+        actor: Uuid,
+        new: NewEntry,
+        mut asset: FixedAsset,
+    ) -> Result<Uuid, EngineError> {
+        let request =
+            json!({ "op": "record_fixed_asset_transaction", "entry": new, "asset": asset });
+        if let Some(done) = self.check_idempotency(new.entry_id, &request)? {
+            return Ok(done);
+        }
+        self.validate_fixed_asset(&asset)?;
+        if asset.linked_entry_id != Some(new.entry_id) || new.entity_id != asset.entity_id {
+            return Err(EngineError::invalid_input(
+                "asset must link to this subject's journal entry",
+            ));
+        }
+        if new.entry_date < asset.in_service_date
+            || asset.accumulated_depreciation_as_of > new.entry_date
+        {
+            return Err(EngineError::invalid_input(
+                "asset transaction date must be on or after service and accumulated depreciation dates",
+            ));
+        }
+        let old = self.state.fixed_assets.get(&asset.asset_id);
+        if let Some(old) = old {
+            if old.status != "ACTIVE"
+                || asset.revision != old.revision
+                || asset.in_service_date != old.in_service_date
+                || (
+                    old.entity_id,
+                    old.property_entity_id,
+                    &old.external_namespace,
+                    &old.external_key,
+                    old.cost_account_id,
+                    old.land_account_id,
+                    old.accumulated_depreciation_account_id,
+                    old.depreciation_expense_account_id,
+                ) != (
+                    asset.entity_id,
+                    asset.property_entity_id,
+                    &asset.external_namespace,
+                    &asset.external_key,
+                    asset.cost_account_id,
+                    asset.land_account_id,
+                    asset.accumulated_depreciation_account_id,
+                    asset.depreciation_expense_account_id,
+                )
+            {
+                return Err(EngineError::invalid_input(
+                    "stale revision, disposed asset or changed asset identity/accounts",
+                ));
+            }
+        } else if asset.revision != 0 || asset.status != "ACTIVE" {
+            return Err(EngineError::invalid_input(
+                "acquisition must create an active revision-zero asset",
+            ));
+        }
+        for (account, previous, current) in [
+            (
+                Some(asset.cost_account_id),
+                old.map_or(Amount::ZERO, |a| a.cost),
+                asset.cost,
+            ),
+            (
+                asset.land_account_id,
+                old.map_or(Amount::ZERO, |a| a.land),
+                asset.land,
+            ),
+            (
+                Some(asset.accumulated_depreciation_account_id),
+                old.map_or(Amount::ZERO, |a| a.accumulated_depreciation)
+                    .checked_neg()
+                    .map_err(EngineError::invalid_input)?,
+                asset
+                    .accumulated_depreciation
+                    .checked_neg()
+                    .map_err(EngineError::invalid_input)?,
+            ),
+        ] {
+            if let Some(account) = account {
+                let delta = current
+                    .checked_sub(previous)
+                    .map_err(EngineError::invalid_input)?;
+                let net = new
+                    .lines
+                    .iter()
+                    .filter(|l| l.account_id == account)
+                    .try_fold(Amount::ZERO, |net, line| {
+                        net.checked_add(line.debit_amount.unwrap_or(Amount::ZERO))?
+                            .checked_sub(line.credit_amount.unwrap_or(Amount::ZERO))
+                    })
+                    .map_err(EngineError::invalid_input)?;
+                if net != delta {
+                    return Err(EngineError::invalid_input("asset cost, land and accumulated depreciation changes must match journal debits minus credits"));
+                }
+            }
+        }
+        for line in &new.lines {
+            let account = self
+                .state
+                .accounts
+                .get(&line.account_id)
+                .ok_or_else(|| EngineError::invalid_input("unknown transaction account"))?;
+            for amount in [line.debit_amount, line.credit_amount]
+                .into_iter()
+                .flatten()
+            {
+                self.validate_currency_precision(account.resource_type_id, amount)?;
+            }
+        }
+        let entry = self.validate_entry(actor, &new)?;
+        if old.is_some() {
+            asset.revision = asset
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| EngineError::invalid_input("asset revision overflow"))?;
+        }
+        let payload = if old.is_some() {
+            EventPayload::FixedAssetUpdated { asset }
+        } else {
+            EventPayload::FixedAssetCreated { asset }
+        };
+        let mut staged = self.state.clone();
+        for (event_id, request, payload) in [
+            (new.entry_id, request, EventPayload::EntryPosted { entry }),
+            (
+                Uuid::new_v4(),
+                json!({ "op": "fixed_asset_transaction_projection", "entry_id": new.entry_id }),
+                payload,
+            ),
+        ] {
+            staged.apply(EventRecord {
+                event_id,
+                book_id: self.book_id(),
+                event_type: payload.event_type(),
+                occurred_at: self.clock.now_ms(),
+                actor_user_id: actor,
+                workflow: new.workflow.clone(),
+                request,
+                payload,
+            });
+        }
+        self.state = staged;
+        Ok(new.entry_id)
+    }
+
     /// Post-or-reject (Impl Spec §2.4, §4.1). On success the entry is an
     /// immutable ledger event; on failure the ledger is untouched.
     pub fn post_entry(&mut self, actor: Uuid, new: NewEntry) -> Result<Uuid, EngineError> {
@@ -1911,6 +2404,17 @@ impl AccountingEngine {
         let request = json!({ "op": "reverse_entry", "spec": spec });
         if let Some(done) = self.check_idempotency(spec.new_entry_id, &request)? {
             return Ok(done);
+        }
+        if self.state.log.iter().any(|record| match &record.payload {
+            EventPayload::FixedAssetCreated { asset }
+            | EventPayload::FixedAssetUpdated { asset } => {
+                asset.linked_entry_id == Some(spec.original_entry_id)
+            }
+            _ => false,
+        }) {
+            return Err(EngineError::invalid_input(
+                "asset-linked entries cannot be reversed independently; use a compensating linked asset transaction or restore a backup",
+            ));
         }
         let original = self
             .state

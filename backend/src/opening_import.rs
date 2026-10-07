@@ -1,5 +1,7 @@
 use ledgerzero_engine::amount::Amount;
-use ledgerzero_engine::domain::{AccountType, EntrySource, WorkflowContext};
+use ledgerzero_engine::domain::{
+    AccountType, DepreciationSchedule, EntrySource, FixedAsset, PropertyProfile, WorkflowContext,
+};
 use ledgerzero_engine::engine::{
     AccountingEngine, ImportPropertyIdentity, NewEntry, NewLine, PrepareImportProperties,
 };
@@ -47,6 +49,67 @@ struct Package {
     control_totals: BTreeMap<String, Totals>,
     entity_namespace: Option<String>,
     related_entities: Option<Vec<RelatedEntity>>,
+    account_definitions: Option<Vec<AccountDefinition>>,
+    property_facts: Option<Vec<PropertyFact>>,
+    fixed_assets: Option<Vec<AssetRow>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountDefinition {
+    external_account_key: String,
+    proposed_account_name: String,
+    proposed_account_type: AccountType,
+    resource_code: String,
+    attribution_entity_key: Option<String>,
+    parent_external_account_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PropertyFact {
+    external_entity_key: String,
+    address: String,
+    property_type: String,
+    source_year: u16,
+    fair_rental_days: u16,
+    personal_use_days: u16,
+    source_id: String,
+    source_reference: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssetRow {
+    external_asset_key: String,
+    name: String,
+    attribution_entity_key: String,
+    cost_account_key: String,
+    accumulated_depreciation_account_key: String,
+    depreciation_expense_account_key: String,
+    land_account_key: Option<String>,
+    in_service_date: Date,
+    cost: String,
+    land: String,
+    depreciable_basis: String,
+    business_use_percent: String,
+    useful_life_years: String,
+    method: String,
+    convention: String,
+    accumulated_depreciation_as_of: Date,
+    accumulated_depreciation: String,
+    schedules: Vec<ScheduleRow>,
+    source_id: String,
+    source_reference: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleRow {
+    year: u16,
+    amount: String,
+    status: String,
+    basis: String,
 }
 
 #[derive(Deserialize)]
@@ -210,7 +273,7 @@ pub fn build_entry(
                 .map(str::to_owned)
         })
         .as_deref()
-        == Some("1.1")
+        .is_some_and(|version| matches!(version, "1.1" | "1.2"))
     {
         return build_v11_entry(request, entity_id, engine);
     }
@@ -241,6 +304,9 @@ pub fn build_entry(
     }
     if package.entity_namespace.is_some()
         || package.related_entities.is_some()
+        || package.account_definitions.is_some()
+        || package.property_facts.is_some()
+        || package.fixed_assets.is_some()
         || package
             .balance_rows
             .iter()
@@ -453,8 +519,15 @@ fn parse_v11(
     }
     let package: Package =
         serde_json::from_value(raw).map_err(|error| format!("invalid import package: {error}"))?;
-    if package.schema_version != "1.1" {
+    if !matches!(package.schema_version.as_str(), "1.1" | "1.2") {
         return Err("unsupported import schema version".into());
+    }
+    if package.schema_version == "1.1"
+        && (package.account_definitions.is_some()
+            || package.property_facts.is_some()
+            || package.fixed_assets.is_some())
+    {
+        return Err("v1.1 package contains v1.2 fields".into());
     }
     let import_id =
         Uuid::parse_str(&package.import_id).map_err(|_| "invalid import_id".to_string())?;
@@ -603,6 +676,9 @@ fn parse_v11(
     {
         return Err("balance rows and control totals do not balance".into());
     }
+    if package.schema_version == "1.2" {
+        validate_v12(&package, resource.precision)?;
+    }
     Ok((
         package,
         import_id,
@@ -652,7 +728,11 @@ fn build_v11_entry(
             return Err("prepared property identity or relationship conflicts with package".into());
         }
     }
-    if request.account_mappings.len() != package.balance_rows.len() {
+    let mapping_count = package
+        .account_definitions
+        .as_ref()
+        .map_or(package.balance_rows.len(), Vec::len);
+    if request.account_mappings.len() != mapping_count {
         return Err("every row must have exactly one account mapping".into());
     }
     let resource = engine
@@ -660,6 +740,39 @@ fn build_v11_entry(
         .into_iter()
         .find(|resource| resource.code == package.resource_codes[0])
         .ok_or("unknown resource")?;
+    if let Some(definitions) = &package.account_definitions {
+        for definition in definitions {
+            let id = request
+                .account_mappings
+                .get(&definition.external_account_key)
+                .ok_or("missing declared account mapping")?;
+            let account = engine
+                .get_account(*id)
+                .ok_or("mapped account does not exist")?;
+            let attribution = definition
+                .attribution_entity_key
+                .as_deref()
+                .map(|key| {
+                    engine
+                        .find_import_entity(&spec.entity_namespace, key)
+                        .map(|entity| entity.entity_id)
+                        .ok_or("property identities must be prepared before posting")
+                })
+                .transpose()?;
+            if !account.is_active
+                || account.chart_id != request.chart_id
+                || account.entity_id != subject_id
+                || account.resource_type_id != resource.resource_type_id
+                || account.account_type != definition.proposed_account_type
+                || account.associated_entity_id != attribution
+            {
+                return Err(format!(
+                    "incompatible account mapping for {}",
+                    definition.external_account_key
+                ));
+            }
+        }
+    }
     let mut lines = Vec::new();
     for row in &package.balance_rows {
         let account_id = *request
@@ -706,7 +819,7 @@ fn build_v11_entry(
         lines,
         prices: Vec::new(),
         source: EntrySource::Workflow,
-        metadata: json!({"kind":"opening_balance_import","schema_version":"1.1","import_id":package.import_id,
+        metadata: json!({"kind":"opening_balance_import","schema_version":package.schema_version,"import_id":package.import_id,
             "entity_namespace":spec.entity_namespace,"source_balance_date":package.source_balance_date,
             "declared_accounting_method":package.declared_accounting_method,"declared_balance_basis":package.declared_balance_basis,
             "source_material":package.source_material.iter().map(|source| json!({"source_id":source.source_id,"sha256":source.sha256,"label":source.label})).collect::<Vec<_>>() }),
@@ -716,4 +829,305 @@ fn build_v11_entry(
             workflow_execution_id: stable_uuid(import_id, "opening-import-execution"),
         }),
     })
+}
+
+fn validate_v12(package: &Package, precision: u8) -> Result<(), String> {
+    let definitions = package
+        .account_definitions
+        .as_ref()
+        .ok_or("v1.2 requires account_definitions")?;
+    let assets = package
+        .fixed_assets
+        .as_ref()
+        .ok_or("v1.2 requires fixed_assets")?;
+    let facts = package
+        .property_facts
+        .as_ref()
+        .ok_or("v1.2 requires property_facts")?;
+    if definitions.is_empty()
+        || assets.is_empty()
+        || !sorted_unique(definitions.iter().map(|d| d.external_account_key.clone()))
+        || !sorted_unique(assets.iter().map(|a| a.external_asset_key.clone()))
+    {
+        return Err("v1.2 requires sorted unique account and asset definitions".into());
+    }
+    let accounts: BTreeMap<_, _> = definitions
+        .iter()
+        .map(|d| (d.external_account_key.as_str(), d))
+        .collect();
+    let properties: BTreeSet<_> = package
+        .related_entities
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|e| e.external_entity_key.as_str())
+        .collect();
+    let sources: BTreeSet<_> = package
+        .source_material
+        .iter()
+        .map(|s| s.source_id.as_str())
+        .collect();
+    for definition in definitions {
+        if !valid_key(&definition.external_account_key)
+            || definition.proposed_account_name.trim().is_empty()
+            || definition.resource_code != package.resource_codes[0]
+            || definition
+                .attribution_entity_key
+                .as_deref()
+                .is_some_and(|key| !properties.contains(key))
+        {
+            return Err("invalid account definition".into());
+        }
+        let mut parent = definition.parent_external_account_key.as_deref();
+        let mut seen = BTreeSet::from([definition.external_account_key.as_str()]);
+        while let Some(key) = parent {
+            if !seen.insert(key) {
+                return Err("cyclic account hierarchy".into());
+            }
+            let ancestor = accounts.get(key).ok_or("unknown account parent key")?;
+            if ancestor.proposed_account_type != definition.proposed_account_type {
+                return Err("account parent type mismatch".into());
+            }
+            parent = ancestor.parent_external_account_key.as_deref();
+        }
+    }
+    for row in &package.balance_rows {
+        let definition = accounts
+            .get(row.external_account_key.as_str())
+            .ok_or("balance row has no account definition")?;
+        if definition.proposed_account_type != row.proposed_account_type
+            || definition.proposed_account_name != row.proposed_account_name
+            || definition.resource_code != row.resource_code
+            || definition.attribution_entity_key != row.attribution_entity_key
+        {
+            return Err("balance row conflicts with account definition".into());
+        }
+    }
+    let mut fact_keys = BTreeSet::new();
+    for fact in facts {
+        let leap = fact.source_year % 4 == 0
+            && (fact.source_year % 100 != 0 || fact.source_year % 400 == 0);
+        if !properties.contains(fact.external_entity_key.as_str())
+            || !fact_keys.insert(fact.external_entity_key.as_str())
+            || fact.address.trim().is_empty()
+            || ![
+                "SINGLE_FAMILY_RESIDENCE",
+                "MULTI_FAMILY_RESIDENCE",
+                "VACATION_SHORT_TERM_RENTAL",
+                "COMMERCIAL",
+                "LAND",
+                "ROYALTIES",
+                "SELF_RENTAL",
+                "OTHER",
+            ]
+            .contains(&fact.property_type.as_str())
+            || fact.source_year.to_string() != package.source_balance_date.as_str()[..4]
+            || u32::from(fact.fair_rental_days) + u32::from(fact.personal_use_days)
+                > if leap { 366 } else { 365 }
+            || !sources.contains(fact.source_id.as_str())
+            || fact.source_reference.trim().is_empty()
+        {
+            return Err("invalid property facts".into());
+        }
+    }
+    if fact_keys != properties {
+        return Err("every property requires source-year facts".into());
+    }
+    let mut totals: BTreeMap<&str, (Amount, Amount)> = BTreeMap::new();
+    for asset in assets {
+        if !valid_key(&asset.external_asset_key)
+            || asset.name.trim().is_empty()
+            || !properties.contains(asset.attribution_entity_key.as_str())
+            || !sources.contains(asset.source_id.as_str())
+            || asset.source_reference.trim().is_empty()
+            || asset.in_service_date > package.source_balance_date
+            || asset.accumulated_depreciation_as_of != package.source_balance_date
+            || asset.method != "SL"
+            || asset.convention != "MM"
+            || decimal(&asset.business_use_percent, 8)? != Amount::from_str("100")?
+            || ![Amount::from_str("27.5")?, Amount::from_str("39")?]
+                .contains(&decimal(&asset.useful_life_years, 8)?)
+        {
+            return Err("invalid asset identity, provenance, date, or depreciation method".into());
+        }
+        let cost = decimal(&asset.cost, precision)?;
+        let land = decimal(&asset.land, precision)?;
+        let basis = decimal(&asset.depreciable_basis, precision)?;
+        let accumulated = decimal(&asset.accumulated_depreciation, precision)?;
+        if cost.is_zero() || basis != cost || accumulated > basis {
+            return Err("asset cost, basis, or accumulated depreciation is invalid".into());
+        }
+        let mut years = BTreeSet::new();
+        let mut previous_year = 0;
+        let mut projected_total = Amount::ZERO;
+        let opening_year: u16 = package.opening_entry_date.as_str()[..4]
+            .parse()
+            .map_err(|_| "invalid opening year")?;
+        if asset.schedules.is_empty() {
+            return Err("asset requires a starting schedule".into());
+        }
+        for schedule in &asset.schedules {
+            let amount = decimal(&schedule.amount, precision)?;
+            if !years.insert(schedule.year)
+                || schedule.year <= previous_year
+                || schedule.year > 9999
+                || schedule.year < opening_year
+                || schedule.status != "PROJECTED"
+                || schedule.basis != "TAX_EQUALS_BOOK"
+                || amount > basis.checked_sub(accumulated)?
+            {
+                return Err("invalid projected depreciation schedule".into());
+            }
+            previous_year = schedule.year;
+            projected_total = projected_total.checked_add(amount)?;
+        }
+        if projected_total > basis.checked_sub(accumulated)? {
+            return Err("projected depreciation exceeds remaining basis".into());
+        }
+        for (key, account_type, debit, credit) in [
+            (
+                asset.cost_account_key.as_str(),
+                AccountType::Asset,
+                cost,
+                Amount::ZERO,
+            ),
+            (
+                asset.accumulated_depreciation_account_key.as_str(),
+                AccountType::Asset,
+                Amount::ZERO,
+                accumulated,
+            ),
+            (
+                asset.depreciation_expense_account_key.as_str(),
+                AccountType::Expense,
+                Amount::ZERO,
+                Amount::ZERO,
+            ),
+        ] {
+            let definition = accounts
+                .get(key)
+                .ok_or("asset references unknown account key")?;
+            if definition.proposed_account_type != account_type
+                || definition.attribution_entity_key.as_deref()
+                    != Some(asset.attribution_entity_key.as_str())
+            {
+                return Err("asset account type or property mismatch".into());
+            }
+            if account_type == AccountType::Asset {
+                let total = totals.entry(key).or_default();
+                total.0 = total.0.checked_add(debit)?;
+                total.1 = total.1.checked_add(credit)?;
+            }
+        }
+        if let Some(key) = asset.land_account_key.as_deref() {
+            if land.is_zero() {
+                return Err("zero land must use a null land account key".into());
+            }
+            let definition = accounts.get(key).ok_or("unknown land account key")?;
+            if definition.proposed_account_type != AccountType::Asset
+                || definition.attribution_entity_key.as_deref()
+                    != Some(asset.attribution_entity_key.as_str())
+            {
+                return Err("land account property mismatch".into());
+            }
+            let total = totals.entry(key).or_default();
+            total.0 = total.0.checked_add(land)?;
+        } else if !land.is_zero() {
+            return Err("nonzero land requires a land account".into());
+        }
+    }
+    for (key, (debit, credit)) in totals {
+        if debit.is_zero() && credit.is_zero() {
+            if package
+                .balance_rows
+                .iter()
+                .any(|r| r.external_account_key == key)
+            {
+                return Err("zero asset controls must not have a balance row".into());
+            }
+            continue;
+        }
+        let row = package
+            .balance_rows
+            .iter()
+            .find(|r| r.external_account_key == key)
+            .ok_or("asset control account has no opening balance row")?;
+        if decimal(&row.debit, precision)? != debit || decimal(&row.credit, precision)? != credit {
+            return Err(format!(
+                "asset register does not reconcile to opening account {key}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn imported_assets(
+    request: &ImportRequest,
+    subject_id: Uuid,
+    engine: &AccountingEngine,
+) -> Result<Vec<FixedAsset>, String> {
+    let (package, import_id, spec) =
+        parse_v11(&request.file_content, request.chart_id, subject_id, engine)?;
+    let resource = engine
+        .list_resource_types()
+        .into_iter()
+        .find(|r| r.code == package.resource_codes[0])
+        .ok_or("unknown resource")?;
+    let account = |key: &str| {
+        request
+            .account_mappings
+            .get(key)
+            .copied()
+            .ok_or("missing asset account mapping".to_string())
+    };
+    package.fixed_assets.as_ref().map(|assets| assets.iter().map(|asset| {
+        let property = engine.find_import_entity(&spec.entity_namespace, &asset.attribution_entity_key).ok_or("missing property")?;
+        let mut digest = Sha256::new();
+        digest.update(engine.book_id().as_bytes());
+        digest.update(spec.entity_namespace.as_bytes());
+        let namespace_hash = digest.finalize();
+        let namespace_id = Uuid::from_bytes(namespace_hash[..16].try_into().unwrap());
+        Ok(FixedAsset {
+            asset_id: stable_uuid(namespace_id, &asset.external_asset_key),
+            entity_id: subject_id, property_entity_id: property.entity_id,
+            external_namespace: spec.entity_namespace.clone(), external_key: asset.external_asset_key.clone(),
+            name: asset.name.clone(), cost_account_id: account(&asset.cost_account_key)?,
+            accumulated_depreciation_account_id: account(&asset.accumulated_depreciation_account_key)?,
+            depreciation_expense_account_id: account(&asset.depreciation_expense_account_key)?,
+            land_account_id: asset.land_account_key.as_deref().map(account).transpose()?,
+            in_service_date: asset.in_service_date.clone(), cost: decimal(&asset.cost, resource.precision)?,
+            land: decimal(&asset.land, resource.precision)?, depreciable_basis: decimal(&asset.depreciable_basis, resource.precision)?,
+            business_use_percent: decimal(&asset.business_use_percent, 8)?, useful_life_years: decimal(&asset.useful_life_years, 8)?,
+            method: asset.method.clone(), convention: asset.convention.clone(),
+            accumulated_depreciation_as_of: asset.accumulated_depreciation_as_of.clone(),
+            accumulated_depreciation: decimal(&asset.accumulated_depreciation, resource.precision)?,
+            schedules: asset.schedules.iter().map(|s| Ok(DepreciationSchedule {year:s.year,amount:decimal(&s.amount,resource.precision)?,status:s.status.clone(),basis:s.basis.clone()})).collect::<Result<Vec<_>,String>>()?,
+            status: "ACTIVE".into(), linked_entry_id: Some(import_id), revision: 0,
+            source_metadata: json!({"source_id":asset.source_id,"source_reference":asset.source_reference,
+                "source_sha256":package.source_material.iter().find(|s|s.source_id==asset.source_id).unwrap().sha256,
+                "import_id":import_id}),
+        })
+    }).collect()).unwrap_or_else(|| Ok(Vec::new()))
+}
+
+pub fn property_profiles(
+    request: &PrepareRequest,
+    subject_id: Uuid,
+    engine: &AccountingEngine,
+) -> Result<Vec<PropertyProfile>, String> {
+    let (package, _, spec) =
+        parse_v11(&request.file_content, request.chart_id, subject_id, engine)?;
+    package.property_facts.as_ref().map(|facts| facts.iter().map(|fact| {
+        let entity = engine.find_import_entity(&spec.entity_namespace, &fact.external_entity_key).ok_or("missing property")?;
+        Ok(PropertyProfile {property_entity_id:entity.entity_id,address:fact.address.clone(),property_type:fact.property_type.clone(),
+            source_year:fact.source_year,fair_rental_days:fact.fair_rental_days,personal_use_days:fact.personal_use_days,
+            source_metadata:json!({"source_id":fact.source_id,"source_reference":fact.source_reference,
+                "source_sha256":package.source_material.iter().find(|s|s.source_id==fact.source_id).unwrap().sha256})})
+    }).collect()).unwrap_or_else(|| Ok(Vec::new()))
+}
+
+pub fn is_v12(file_content: &str) -> bool {
+    serde_json::from_str::<Value>(file_content)
+        .ok()
+        .is_some_and(|v| v["schema_version"] == "1.2")
 }
