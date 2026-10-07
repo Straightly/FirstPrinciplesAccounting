@@ -336,7 +336,7 @@ Spec interpretation used for implementation: sub-book creation copies parent boo
 
 ## Implementation phase status in this implementation repo.
 
-This section records the current implementation phase split in `/Users/zhian/Projects/FirstPrincipleAccountingSpec` without reconciling the older writing copy under `Writing/Accounting` yet. The detailed implementation plan of record is `LedgerZero_Impl_Plan_v1.md`; the broad 20-step implementation section above remains useful as planning history, but the live implementation status is tracked by the phase plan below.
+This section records the current implementation phase split in `/Volumes/DevData/FirstPrincipleAccountingSpec` without reconciling the older writing copy under `Writing/Accounting` yet. The detailed implementation plan of record is `LedgerZero_Impl_Plan_v1.md`; the broad 20-step implementation section above remains useful as planning history, but the live implementation status is tracked by the phase plan below.
 
 - [X] Phase 1 — runnable single-book LedgerZero system
   - Dependencies: M0-M10 in `LedgerZero_Impl_Plan_v1.md`.
